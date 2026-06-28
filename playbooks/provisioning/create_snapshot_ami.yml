@@ -1,0 +1,58 @@
+---
+# ===========================================================================
+# 稼働中のHyper-V検証ホストから スナップショット(カスタムAMI) を作成する
+#  - Hyper-V役割/WinRM設定済みの状態を保存し、再利用できるようにする
+# 実行: ansible-playbook create_snapshot_ami.yml
+# 対象: group_vars/all.yml の instance_name のインスタンス
+# 出力: 作成したAMI ID（→ group_vars/all.yml の snapshot_image_id に設定して再利用）
+# ===========================================================================
+- name: Create snapshot AMI from Hyper-V host
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - group_vars/all.yml
+  vars:
+    snapshot_timestamp: "{{ lookup('pipe', 'date +%Y%m%d-%H%M%S') }}"
+  tasks:
+    - name: 対象インスタンスを特定する
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          "tag:Name": "{{ instance_name }}"
+          "instance-state-name": ["running", "stopped"]
+      register: target
+
+    - name: インスタンスが1台特定できることを確認する
+      ansible.builtin.assert:
+        that:
+          - target.instances | length == 1
+        fail_msg: "対象インスタンスが {{ target.instances | length }} 台です（1台である必要があります）。instance_name を確認してください。"
+        success_msg: "対象: {{ target.instances[0].instance_id }}"
+        quiet: true
+
+    - name: スナップショット(AMI)を作成する
+      amazon.aws.ec2_ami:
+        region: "{{ aws_region }}"
+        instance_id: "{{ target.instances[0].instance_id }}"
+        name: "{{ instance_name }}-snapshot-{{ snapshot_timestamp }}"
+        description: "Hyper-V host snapshot (Hyper-V role / WinRM configured) from {{ instance_name }}"
+        # no_reboot: true にすると無停止で取得（ファイルシステム整合性は落ちる）。
+        # 既定(false)は一旦停止して取得＝整合性重視。検証用途では false 推奨。
+        no_reboot: false
+        wait: true
+        wait_timeout: 1800
+        tags:
+          Project: hyperv-vm-build
+          Role: hyperv-host-snapshot
+          Source: "{{ instance_name }}"
+      register: ami
+
+    - name: 作成結果を表示する
+      ansible.builtin.debug:
+        msg:
+          - "スナップショットAMIを作成しました。"
+          - "  AMI ID : {{ ami.image_id }}"
+          - "  Name   : {{ instance_name }}-snapshot-{{ snapshot_timestamp }}"
+          - "次の手順: group_vars/all.yml の snapshot_image_id にこのAMI IDを設定し、"
+          - "          ansible-playbook provision_from_snapshot.yml で起動できます。"

@@ -1,0 +1,50 @@
+---
+# ===========================================================================
+# 検証用AWS環境の削除（EC2インスタンス + セキュリティグループ）
+# 実行: ansible-playbook terminate_ec2_hyperv.yml
+# 対象: provision_ec2_hyperv.yml で作成した instance_name / sg_name（group_vars/all.yml）
+# 注意: 完全削除（terminate）。EBSも delete_on_termination=true のため消える。
+# ===========================================================================
+- name: Terminate EC2 Hyper-V host and cleanup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - group_vars/all.yml
+  tasks:
+    - name: 削除対象を確認する
+      ansible.builtin.pause:
+        prompt: |
+          以下を削除します。よろしければ Enter、中止は Ctrl-C → a。
+            region   : {{ aws_region }}
+            instance : {{ instance_name }}（terminate / EBSも削除）
+            sg       : {{ sg_name }}
+
+    - name: EC2インスタンスを削除する（terminate）
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        state: absent
+        filters:
+          "tag:Name": "{{ instance_name }}"
+          instance-state-name: ["pending", "running", "stopping", "stopped"]
+        wait: true
+      register: term
+
+    - name: 削除結果を表示する
+      ansible.builtin.debug:
+        msg: "terminated: {{ term.terminated_ids | default([]) }}"
+
+    - name: セキュリティグループを削除する
+      amazon.aws.ec2_security_group:
+        name: "{{ sg_name }}"
+        region: "{{ aws_region }}"
+        state: absent
+      register: sg_del
+      # インスタンス削除直後はENI解放待ちでSGが消せないことがあるためリトライ
+      retries: 6
+      delay: 20
+      until: sg_del is succeeded
+
+    - name: 完了メッセージ
+      ansible.builtin.debug:
+        msg: "検証環境の削除が完了しました（instance: {{ instance_name }} / sg: {{ sg_name }}）"

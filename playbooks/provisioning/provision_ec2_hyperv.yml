@@ -1,0 +1,84 @@
+---
+# ===========================================================================
+# AWS EC2 に Hyper-V 検証ホスト（Windows Server 2025 / ベアメタル）を構築する
+#  - userdata で ConfigureRemotingForAnsible.ps1 を実行し WinRM を有効化
+#  - Hyper-V 役割をインストール（検証VM 3台分）
+# 実行: ansible-playbook provision_ec2_hyperv.yml
+# 事前: pip install boto3 botocore / AWS認証情報（環境変数 or プロファイル）
+# ===========================================================================
+- name: Provision EC2 Hyper-V host (Windows Server 2025)
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - group_vars/all.yml
+  tasks:
+    - name: Windows Server の最新AMIを取得する
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"
+        owners: amazon
+        filters:
+          name: "{{ ami_name_pattern }}"
+          state: available
+      register: ami_info
+
+    - name: 最新AMI IDを決定する
+      ansible.builtin.set_fact:
+        win_ami: "{{ (ami_info.images | sort(attribute='creation_date') | last).image_id }}"
+
+    - name: 取得したAMIを表示する
+      ansible.builtin.debug:
+        msg: "Windows Server AMI: {{ win_ami }}（{{ ami_name_pattern }}）"
+
+    - name: セキュリティグループを作成する（RDP/WinRM を自IPのみ許可）
+      amazon.aws.ec2_security_group:
+        name: "{{ sg_name }}"
+        description: "Hyper-V verification host - RDP/WinRM from my IP"
+        region: "{{ aws_region }}"
+        vpc_id: "{{ vpc_id }}"
+        rules:
+          - proto: tcp
+            ports: [3389]
+            cidr_ip: "{{ my_ip_cidr }}"
+            rule_desc: RDP
+          - proto: tcp
+            ports: [5985, 5986]
+            cidr_ip: "{{ my_ip_cidr }}"
+            rule_desc: WinRM
+      register: sg
+
+    - name: EC2インスタンス（ベアメタル）を起動する
+      amazon.aws.ec2_instance:
+        name: "{{ instance_name }}"
+        region: "{{ aws_region }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ win_ami }}"
+        key_name: "{{ key_name }}"
+        network_interfaces:
+          - assign_public_ip: true
+            subnet_id: "{{ vpc_subnet_id }}"
+            groups:
+              - "{{ sg.group_id }}"
+        volumes:
+          - device_name: /dev/sda1
+            ebs:
+              volume_size: "{{ root_volume_gb }}"
+              volume_type: gp3
+              delete_on_termination: true
+        user_data: "{{ lookup('file', 'files/userdata.ps1') }}"
+        wait: true
+        tags:
+          Project: hyperv-vm-build
+          Role: hyperv-host
+      register: ec2
+
+    - name: 接続情報を表示する
+      ansible.builtin.debug:
+        msg:
+          - "instance_id : {{ ec2.instances[0].instance_id }}"
+          - "public_ip   : {{ ec2.instances[0].public_ip_address | default('N/A') }}"
+          - "次の手順:"
+          - "  1) ../packages/vm_build/inventory.ini の ansible_host に上記 public_ip を設定"
+          - "  2) Administratorパスワード取得:"
+          - "     aws ec2 get-password-data --instance-id {{ ec2.instances[0].instance_id }} --priv-launch-key <キーペア.pem>"
+          - "  3) Hyper-V有効化の再起動完了まで数分待ってから WinRM(5986) 接続を確認"

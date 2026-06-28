@@ -1,0 +1,23 @@
+---
+# import_template_vm ロール 既定値
+# Exastro由来の複数具体値変数 VAR_vm（実行時はパラメータシートの値で上書きされる）。
+# 1レコード = 1VM。メンバー変数は item.<member> で参照する。
+# 参考レコード構造（バンドルON・代入順序＝loop順）:
+#   - name: vm01                 # VAR_vm.name        作成するVM名
+#     os_type: windows           # VAR_vm.os_type     rhel / windows
+#     template_path: "D:\\Templates\\WS2022\\Virtual Machines"  # VAR_vm.template_path（.vmcxの1つ上の'Virtual Machines'フォルダ。配下の*.vmcxをwin_findで取得）
+#     cpu_count: 4               # VAR_vm.cpu_count
+#     memory_startup_mb: 4096    # VAR_vm.memory_startup_mb
+#     memory_dynamic: false      # VAR_vm.memory_dynamic
+#     memory_min_mb: 2048        # VAR_vm.memory_min_mb（動的時のみ）
+#     memory_max_mb: 8192        # VAR_vm.memory_max_mb（動的時のみ）
+#     switch_name: "vSwitch01"   # VAR_vm.switch_name
+#     vlan_id: ""                # VAR_vm.vlan_id（未使用時は空）
+#     secure_boot: "on"          # VAR_vm.secure_boot  on / off / rhel
+#     guest_admin_user: "Administrator"     # VAR_vm.guest_admin_user
+#     guest_admin_password: "********"       # VAR_vm.guest_admin_password（機密・no_log）
+#     guest_ip_address: "192.168.10.21"      # VAR_vm.guest_ip_address（Windowsのみ）
+#     guest_subnet_prefix: 24                # VAR_vm.guest_subnet_prefix（Windowsのみ）
+#     guest_default_gateway: "192.168.10.1"  # VAR_vm.guest_default_gateway（Windowsのみ）
+#     guest_dns_servers: ["192.168.10.1"]    # VAR_vm.guest_dns_servers（Windowsのみ）
+VAR_vm: []

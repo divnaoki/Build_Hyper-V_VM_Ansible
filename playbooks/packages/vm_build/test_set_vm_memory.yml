@@ -1,0 +1,11 @@
+---
+# set_vm_memory ローカル検証用 playbook
+# 実行: ansible-playbook test_set_vm_memory.yml
+# 前提: testvm01(動的メモリ) / testvm02(静的メモリ) が Hyper-V ホスト上に存在（停止中でも可）。
+- name: 検証 - set_vm_memory
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars_files:
+    - roles/set_vm_memory/group_vars/main.yml
+  roles:
+    - set_vm_memory

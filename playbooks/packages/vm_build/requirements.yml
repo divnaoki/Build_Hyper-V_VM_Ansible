@@ -1,0 +1,5 @@
+---
+# 検証前に: ansible-galaxy collection install -r requirements.yml
+collections:
+  - name: microsoft.hyperv
+  - name: ansible.windows

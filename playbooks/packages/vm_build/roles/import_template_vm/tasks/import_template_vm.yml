@@ -1,0 +1,94 @@
+---
+# 種別: VMプロビジョニング（テンプレートインポート）
+# 対象: Hyper-Vホスト（WinRM接続）。1ホストに複数VMを VAR_vm で loop 構築。
+# 冪等性: Get-VM で同名VMの存在を確認し、無い場合のみ Import-VM（-Copy -GenerateNewId）→ Rename-VM。
+# モジュール: microsoft.hyperv に Import-VM 相当のモジュールが無いため win_shell で実装し、
+#            when ガード＋changed_when で冪等化する（hv_vm は新規作成用でテンプレートImport非対応）。
+# 入力: item.template_path はエクスポートVMの 'Virtual Machines' フォルダ（.vmcx の1つ上）。
+#       win_find で *.vmcx を検索し、そのフルパスを Import-VM に渡す。
+# 前後取得: before=既存VM有無 / after=作成後VM存在。
+# 変数: VAR_vm（複数具体値変数）。メンバーは item.<member>。内部変数は VAR_ なし。
+
+# --- 0. テンプレート .vmcx の検索（template_path = 'Virtual Machines' フォルダ） ---
+- name: テンプレートの .vmcx を検索する（要素ごと）
+  ansible.windows.win_find:
+    paths: "{{ item.template_path }}"
+    patterns: ['*.vmcx']
+    file_type: file
+    recurse: false
+    get_checksum: false
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: template_find
+  changed_when: false
+
+- name: .vmcx が見つからない要素があれば異常終了する
+  ansible.builtin.fail:
+    msg: ".vmcx が見つかりません: {{ item.template_path }} ({{ item.name }})"
+  when: template_find.results[idx].files | length == 0
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 1. 事前確認(before)：既存VMの有無 ---
+- name: 既存VMの有無を取得する（before）
+  ansible.windows.win_shell: |
+    if (Get-VM -Name '{{ item.name }}' -ErrorAction SilentlyContinue) { 'EXISTS' } else { 'ABSENT' }
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: vm_before
+  changed_when: false
+
+# --- 2. 変更：同名VMが無い場合のみインポート（非冪等コマンドを when ガードで冪等化） ---
+- name: テンプレートをインポートしてVMを作成・リネームする（同名VMが無い場合のみ）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $base = '{{ item.vm_base_path | default("C:\\VMs") }}\{{ item.name }}'
+    $imported = Import-VM -Path '{{ template_find.results[idx].files[0].path }}' -Copy -GenerateNewId -VirtualMachinePath $base -VhdDestinationPath "$base\Virtual Hard Disks" -SnapshotFilePath "$base\Snapshots" -SmartPagingFilePath $base
+    Rename-VM -VM $imported -NewName '{{ item.name }}'
+    'CHANGED'
+  when: "'ABSENT' in vm_before.results[idx].stdout"
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  register: import_result
+  changed_when: "'CHANGED' in (stdout | default(''))"
+
+# --- 3. 事後確認(after)：作成後のVM存在 ---
+- name: 作成後のVM存在を取得する（after）
+  ansible.windows.win_shell: |
+    if (Get-VM -Name '{{ item.name }}' -ErrorAction SilentlyContinue) { 'EXISTS' } else { 'ABSENT' }
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: vm_after
+  changed_when: false
+
+# --- 4. 正常性検証 ---
+- name: VMが作成されたことを検証する
+  ansible.builtin.assert:
+    that:
+      - "'EXISTS' in vm_after.results[idx].stdout"
+    fail_msg: "VM作成に失敗しました: {{ item.name }}"
+    success_msg: "VMが存在します: {{ item.name }}"
+    quiet: true
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 5. エビデンス出力 ---
+- name: インポート結果の前後差分をエビデンス出力する
+  ansible.builtin.debug:
+    msg:
+      - "vm     : {{ item.name }}"
+      - "before : {{ vm_before.results[idx].stdout | trim }}"
+      - "after  : {{ vm_after.results[idx].stdout | trim }}"
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx

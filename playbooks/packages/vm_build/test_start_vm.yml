@@ -1,0 +1,12 @@
+---
+# start_vm ローカル検証用 playbook
+# 実行: ansible-playbook test_start_vm.yml
+# 前提: testvm01 / testvm02 が Hyper-V ホスト上に存在すること（停止/起動どちらでも可）。
+#       既に Running のVMは冪等で changed=false。
+- name: 検証 - start_vm
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars_files:
+    - roles/start_vm/group_vars/main.yml
+  roles:
+    - start_vm

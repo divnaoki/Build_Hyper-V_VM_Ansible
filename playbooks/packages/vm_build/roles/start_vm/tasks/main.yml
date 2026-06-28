@@ -1,0 +1,3 @@
+---
+- name: VM起動タスクを読み込む
+  ansible.builtin.include_tasks: start_vm.yml

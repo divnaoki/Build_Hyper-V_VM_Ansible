@@ -1,0 +1,14 @@
+---
+# import_template_vm ローカル検証用 playbook
+# 実行: ansible-playbook test_import_template_vm.yml
+# 前提:
+#   - group_vars の template_path に、sysprep済みテンプレートのエクスポート先
+#     （'Virtual Machines' フォルダ。配下に *.vmcx がある）を配置済みであること。
+#   - 同名VMが既に存在する場合はインポートをスキップ（冪等）。
+- name: 検証 - import_template_vm
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars_files:
+    - roles/import_template_vm/group_vars/main.yml
+  roles:
+    - import_template_vm

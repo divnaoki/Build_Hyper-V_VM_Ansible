@@ -1,0 +1,3 @@
+---
+# set_vm_memory ロール 既定値（VAR_vm の構造は import_template_vm/defaults/main.yml を参照）
+VAR_vm: []

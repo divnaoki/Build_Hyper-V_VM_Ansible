@@ -1,0 +1,48 @@
+---
+# ===========================================================================
+# スナップショット(カスタムAMI) を削除する
+#  - AMIの登録解除＋紐づくEBSスナップショットも削除し、保管課金を停止する
+# 実行: ansible-playbook delete_snapshot_ami.yml
+# 対象: group_vars/all.yml の snapshot_image_id
+# 注意: 削除後はそのスナップショットからの復元（provision_from_snapshot.yml）はできなくなる。
+# ===========================================================================
+- name: Delete snapshot AMI and its EBS snapshots
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars_files:
+    - group_vars/all.yml
+  tasks:
+    - name: snapshot_image_id が設定されていることを確認する
+      ansible.builtin.assert:
+        that:
+          - snapshot_image_id is defined
+          - snapshot_image_id | length > 0
+          - snapshot_image_id is match('^ami-')
+        fail_msg: "group_vars/all.yml の snapshot_image_id に削除対象のAMI ID（ami-...）を設定してください。"
+        success_msg: "削除対象スナップショットAMI: {{ snapshot_image_id }}"
+        quiet: true
+
+    - name: 削除内容を確認する
+      ansible.builtin.pause:
+        prompt: |
+          以下のスナップショットを削除します（紐づくEBSスナップショットも削除）。
+          よろしければ Enter、中止は Ctrl-C → a。
+            region : {{ aws_region }}
+            AMI    : {{ snapshot_image_id }}
+          ※ 削除後はこのスナップショットからの復元はできません。
+
+    - name: スナップショット(AMI)を登録解除し、EBSスナップショットも削除する
+      amazon.aws.ec2_ami:
+        region: "{{ aws_region }}"
+        image_id: "{{ snapshot_image_id }}"
+        state: absent
+        delete_snapshot: true
+        wait: true
+      register: ami_del
+
+    - name: 削除結果を表示する
+      ansible.builtin.debug:
+        msg:
+          - "スナップショットAMIを削除しました: {{ snapshot_image_id }}"
+          - "→ group_vars/all.yml の snapshot_image_id は空に戻すか、別のIDへ更新してください。"

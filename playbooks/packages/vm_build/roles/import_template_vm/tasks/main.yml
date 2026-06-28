@@ -1,0 +1,4 @@
+---
+# import_template_vm: Movementから呼ばれるエントリ
+- name: テンプレートVMインポートタスクを読み込む
+  ansible.builtin.include_tasks: import_template_vm.yml

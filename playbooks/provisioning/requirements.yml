@@ -1,0 +1,5 @@
+---
+# 事前: ansible-galaxy collection install -r requirements.yml
+#       pip install boto3 botocore
+collections:
+  - name: amazon.aws

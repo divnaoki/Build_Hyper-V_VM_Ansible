@@ -1,0 +1,3 @@
+---
+- name: vCPU設定タスクを読み込む
+  ansible.builtin.include_tasks: set_vm_cpu.yml
