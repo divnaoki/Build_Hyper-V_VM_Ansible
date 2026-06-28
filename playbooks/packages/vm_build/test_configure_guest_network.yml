@@ -1,0 +1,15 @@
+---
+# configure_guest_network ローカル検証用 playbook
+# 実行: ansible-playbook test_configure_guest_network.yml
+# 前提:
+#   - testvm01 / testvm02 が起動済みで PowerShell Direct 接続できること。
+#   - 各VMが LocalLAN 仮想スイッチに接続済み（NICマウント済み）であること。
+#   - group_vars の guest_admin_password / guest_ip_address を実環境に合わせて設定すること。
+# 注意: ホスト名が変わった場合、反映のため対象VMを再起動します。
+- name: 検証 - configure_guest_network
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars_files:
+    - roles/configure_guest_network/group_vars/main.yml
+  roles:
+    - configure_guest_network

@@ -1,0 +1,143 @@
+---
+# 種別: ゲストOS構成（IPアドレス＋ホスト名）
+# 対象: Hyper-Vホスト（WinRM）。ゲスト内設定は PowerShell Direct（Invoke-Command -VMName）で実施。
+# 接続: 指定の仮想スイッチ（既定 LocalLAN）に接続済みのNICにIPを設定する。NICはMACで特定。
+# ホスト名: VM名（item.name）に設定する。変更時は再起動して反映。
+# 対象OS: Windows のみ（item.os_type == 'windows'）。
+# 冪等性: 現在のIP/ホスト名が目標と一致していれば変更しない。
+# 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は no_log なしで可視化。
+# 変数: VAR_vm。item.name / os_type / guest_admin_user / guest_admin_password /
+#       guest_switch_name / guest_ip_address / guest_subnet_prefix / guest_default_gateway / guest_dns_servers
+
+# --- 1. ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ） ---
+- name: ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ScriptBlock { 'READY' }
+  when: item.os_type == 'windows'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: guest_ready
+  until: guest_ready is succeeded and 'READY' in (guest_ready.stdout | default(''))
+  retries: 30
+  delay: 10
+  changed_when: false
+  no_log: true
+
+# --- 2. LocalLAN仮想スイッチに接続されたNICのMACを取得する（ホスト側） ---
+- name: 対象NIC（指定スイッチ接続）のMACを取得する
+  ansible.windows.win_shell: |
+    $a = Get-VMNetworkAdapter -VMName '{{ item.name }}' |
+         Where-Object { $_.SwitchName -eq '{{ item.guest_switch_name | default("LocalLAN") }}' } |
+         Select-Object -First 1
+    if (-not $a) { throw "スイッチ '{{ item.guest_switch_name | default("LocalLAN") }}' に接続されたNICがありません: {{ item.name }}" }
+    $a.MacAddress
+  when: item.os_type == 'windows'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: nic_mac
+  changed_when: false
+
+# --- 3. ゲスト内でIP・ホスト名を設定する（Windowsのみ・PowerShell Direct） ---
+- name: ゲスト内のIPアドレスとホスト名を設定する（Windowsのみ）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ nic_mac.results[idx].stdout | trim }}', '{{ item.guest_ip_address }}', {{ item.guest_subnet_prefix }}, '{{ item.guest_default_gateway | default("") }}', '{{ item.guest_dns_servers | default([]) | join(",") }}', '{{ item.name }}' -ScriptBlock {
+      param($mac, $ip, $prefix, $gw, $dnsCsv, $newName)
+      $ErrorActionPreference = 'Stop'
+      # 指定MACのNICを特定（ホスト側12桁とゲスト側XX-XX形式を正規化して比較）
+      $macN = ($mac -replace '[-:]', '').ToUpper()
+      $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
+      if (-not $nic) { throw "対象NICが見つかりません (MAC=$mac)" }
+      $ifIndex = $nic.ifIndex
+      $beforeIp   = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+      $beforeName = $env:COMPUTERNAME
+
+      # IP設定（現在のIPが目標と異なる時のみ再設定）
+      $ipChanged = $false
+      if ($beforeIp -ne $ip) {
+        Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+        Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+        if ($gw) {
+          New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gw | Out-Null
+        } else {
+          New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix | Out-Null
+        }
+        $ipChanged = $true
+      }
+      # DNS（指定があれば設定、無ければ自動に戻す）
+      if ($dnsCsv) { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses ($dnsCsv -split ',') }
+      else { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses }
+
+      # ホスト名（VM名）設定（現在名と異なる時のみ。反映には再起動が必要）
+      $nameChanged = $false
+      if ($beforeName -ne $newName) { Rename-Computer -NewName $newName -Force | Out-Null; $nameChanged = $true }
+
+      $afterIp = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Select-Object -First 1).IPAddress
+      [pscustomobject]@{
+        mac = $mac
+        before_ip = $beforeIp; after_ip = $afterIp
+        before_name = $beforeName; after_name = $newName
+        ip_changed = $ipChanged; name_changed = $nameChanged
+      } | ConvertTo-Json -Compress
+    }
+  when: item.os_type == 'windows'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  register: guest_net
+  changed_when: '''"ip_changed":true'' in (stdout | default('''')) or ''"name_changed":true'' in (stdout | default(''''))'
+  # no_log: true
+
+# --- 4. 設定結果の検証（IPが目標どおり設定されたか） ---
+- name: IPアドレスが設定されたことを検証する（Windowsのみ）
+  ansible.builtin.assert:
+    that:
+      - "(guest_net.results[idx].stdout | trim | from_json).after_ip == item.guest_ip_address"
+    fail_msg: >-
+      IP設定に失敗しました: {{ item.name }}
+      (期待={{ item.guest_ip_address }} /
+      実際={{ (guest_net.results[idx].stdout | trim | from_json).after_ip | default('なし') }})
+    success_msg: "IP設定OK: {{ item.name }}（{{ item.guest_ip_address }}/{{ item.guest_subnet_prefix }}）"
+    quiet: true
+  when: item.os_type == 'windows'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 5. エビデンス出力（IP・ホスト名の前後） ---
+- name: IP・ホスト名設定の前後をエビデンス出力する
+  ansible.builtin.debug:
+    msg:
+      - "vm   : {{ item.name }}"
+      - "ip   : {{ (guest_net.results[idx].stdout | trim | from_json).before_ip | default('-') }} -> {{ (guest_net.results[idx].stdout | trim | from_json).after_ip }}"
+      - "host : {{ (guest_net.results[idx].stdout | trim | from_json).before_name }} -> {{ (guest_net.results[idx].stdout | trim | from_json).after_name }} (reboot_required={{ (guest_net.results[idx].stdout | trim | from_json).name_changed }})"
+  when: item.os_type == 'windows'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 6. ホスト名変更を反映するため再起動する（変更時のみ・Windows） ---
+- name: ホスト名変更を反映するため再起動する（変更時のみ）
+  ansible.windows.win_shell: |
+    $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ScriptBlock { Restart-Computer -Force }
+  when:
+    - item.os_type == 'windows'
+    - '''"name_changed":true'' in (guest_net.results[idx].stdout | default(''''))'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  changed_when: true
+  no_log: true

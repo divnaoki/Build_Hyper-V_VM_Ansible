@@ -1,0 +1,14 @@
+---
+# configure_guest_network ロール 既定値
+# VAR_vm の基本構造は import_template_vm/defaults/main.yml を参照。
+# 本ロールで参照する VAR_vm メンバー:
+#   - name                       ホスト名としても使用（NetBIOS: 15文字以内・英数推奨）
+#     os_type: windows           Windows のみ実行
+#     guest_admin_user: "Administrator"   PowerShell Direct(Invoke-Command -VMName)用
+#     guest_admin_password: "********"     同上・機密(no_log)
+#     guest_switch_name: "LocalLAN"        IP設定対象NICを特定する仮想スイッチ名（既マウント済み）
+#     guest_ip_address: "192.168.100.11"   設定するIPv4
+#     guest_subnet_prefix: 24              プレフィックス長
+#     guest_default_gateway: ""            既定GW（LocalLAN内部で不要なら空文字）
+#     guest_dns_servers: []                DNS（リスト。空なら自動取得にリセット）
+VAR_vm: []

@@ -21,7 +21,8 @@ hyperv-vm-build/
 │   │   │   ├── set_vm_cpu/
 │   │   │   ├── set_vm_memory/
 │   │   │   ├── set_vm_disk/
-│   │   │   └── start_vm/
+│   │   │   ├── start_vm/
+│   │   │   └── configure_guest_network/
 │   │   │       └── group_vars/main.yml  # ★git管理外（検証値。下記参照）
 │   │   └── test_*.yml              # 検証用Playbook
 │   └── provisioning/               # 検証環境(AWS EC2)の構築・スナップショット運用
@@ -44,10 +45,11 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
+| **configure_guest_network** | ゲストOSのIPアドレスとホスト名を設定する。LocalLAN仮想スイッチに接続されたNIC（MACで特定）にIPを設定し、ホスト名をVM名に変更する（変更時は再起動して反映）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
-> （ネットワーク/ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk`
-> ※ `set_vm_disk` のゲスト内拡張はVM起動が前提のため、`start_vm` の後に実行します。
+> （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
+> ※ `set_vm_disk` / `configure_guest_network` のゲスト内設定はVM起動が前提のため、`start_vm` の後に実行します。
 
 ---
 
@@ -71,8 +73,9 @@ ansible-galaxy collection install -r requirements.yml
 ansible-playbook -i inventory.ini test_import_template_vm.yml   # テンプレからVM作成
 ansible-playbook -i inventory.ini test_set_vm_cpu.yml           # vCPU設定
 ansible-playbook -i inventory.ini test_set_vm_memory.yml        # メモリ設定
-ansible-playbook -i inventory.ini test_start_vm.yml             # VM起動
-ansible-playbook -i inventory.ini test_set_vm_disk.yml          # OSディスク拡張（起動後）
+ansible-playbook -i inventory.ini test_start_vm.yml                 # VM起動
+ansible-playbook -i inventory.ini test_set_vm_disk.yml             # OSディスク拡張（起動後）
+ansible-playbook -i inventory.ini test_configure_guest_network.yml # IP・ホスト名設定（起動後）
 ```
 
 各 `test_*.yml` は `vars_files` で対応する `roles/<role>/group_vars/main.yml` を読み込みます
@@ -131,6 +134,7 @@ VAR_vm:
 # set_vm_memory: name / memory_startup_mb / memory_dynamic / memory_min_mb / memory_max_mb
 # set_vm_disk: name / os_type / os_disk_size_gb / os_disk_drive_letter / guest_admin_user / guest_admin_password
 # start_vm: name
+# configure_guest_network: name / os_type / guest_admin_user / guest_admin_password / guest_switch_name / guest_ip_address / guest_subnet_prefix / guest_default_gateway / guest_dns_servers
 ```
 
 ### ③ `playbooks/provisioning/group_vars/all.yml`
