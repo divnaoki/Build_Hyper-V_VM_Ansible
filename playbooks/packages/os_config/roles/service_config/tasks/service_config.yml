@@ -1,0 +1,15 @@
+---
+# 種別: サービス設定（自動起動の無効化／不可なら手動）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_service。
+# 方針: 指定の start_mode（既定 disabled）に設定。disabled にできない場合は manual にフォールバック。
+#       block/rescue を1件ずつ適用するため include_tasks でループする。
+# 変数: VAR_services[]（name / startup_type（既定 disabled） / state（既定 stopped））バンドルON。
+
+- name: サービスを1件ずつ設定する（disabled→manualフォールバック）
+  ansible.builtin.include_tasks: _service_one.yml
+  loop: "{{ VAR_services | default([]) }}"
+  loop_control:
+    label: "{{ svc.name }}"
+    loop_var: svc
+  when: VAR_services | default([]) | length > 0

@@ -1,0 +1,50 @@
+---
+# 種別: 時刻同期（タイムゾーン＋NTP）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: community.windows.win_timezone / ansible.windows.win_service / win_command（w32tm）。
+# 冪等: timezone/serviceはモジュールが冪等。NTPはw32tm configを当て、resyncは失敗許容。
+# 変数: VAR_timezone / VAR_ntp_servers[]。
+
+- name: タイムゾーンを設定する
+  community.windows.win_timezone:
+    timezone: "{{ VAR_timezone }}"
+  when: VAR_timezone | default('') | length > 0
+
+- name: w32timeサービスを自動起動かつ起動する
+  ansible.windows.win_service:
+    name: w32time
+    start_mode: auto
+    state: started
+
+# [MUST-1] 冪等化: 現NTP設定を取得し、目標サーバが全て設定済みなら config をスキップする
+- name: 現在のNTP設定を取得する（before）
+  ansible.windows.win_command: w32tm /query /configuration
+  register: ntp_before
+  changed_when: false
+  failed_when: false
+
+- name: NTPサーバ（manualpeerlist）を設定する（未設定サーバがある場合のみ）
+  ansible.windows.win_command: >-
+    w32tm /config /manualpeerlist:"{{ VAR_ntp_servers | join(' ') }}" /syncfromflags:manual /update
+  when:
+    - VAR_ntp_servers | default([]) | length > 0
+    # 目標NTPサーバのうち、現設定(before)に含まれていないものが1つでもあれば設定する
+    - (VAR_ntp_servers | reject('in', ntp_before.stdout | default('')) | list | length) > 0
+  register: ntp_config
+  changed_when: ntp_config is not skipped
+
+- name: 時刻を再同期する（設定変更時のみ・失敗は許容）
+  ansible.windows.win_command: w32tm /resync
+  when:
+    - VAR_ntp_servers | default([]) | length > 0
+    - ntp_config is not skipped
+  register: ntp_resync
+  changed_when: false
+  failed_when: false
+
+- name: 時刻同期エビデンスを出力する
+  ansible.builtin.debug:
+    msg:
+      - "timezone : {{ VAR_timezone | default('(変更なし)') }}"
+      - "ntp      : {{ VAR_ntp_servers | default([]) | join(', ') | default('(変更なし)') }}"
+      - "resync   : {{ ntp_resync.rc | default('skip') }}"

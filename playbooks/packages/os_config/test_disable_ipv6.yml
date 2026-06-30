@@ -1,0 +1,9 @@
+---
+# disable_ipv6 検証用 playbook（反映には再起動が必要）
+- name: 検証 - disable_ipv6
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/disable_ipv6/group_vars/main.yml
+  roles:
+    - disable_ipv6

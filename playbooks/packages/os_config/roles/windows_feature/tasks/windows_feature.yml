@@ -1,0 +1,29 @@
+---
+# 種別: 役割と機能（Windows Features）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_feature（冪等）。
+# 再起動: 一部機能で必要。win_feature の reboot_required を reboot_required に集約。
+# 変数: VAR_features[]（name / state / include_management_tools / include_sub_features）バンドルON。
+
+- name: 役割と機能を構成する
+  ansible.windows.win_feature:
+    name: "{{ item.name }}"
+    state: "{{ item.state | default('present') }}"
+    include_management_tools: "{{ item.include_management_tools | default(false) }}"
+    include_sub_features: "{{ item.include_sub_features | default(false) }}"
+  loop: "{{ VAR_features | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: feature_result
+  when: VAR_features | default([]) | length > 0
+
+- name: 再起動要否を集約する
+  ansible.builtin.set_fact:
+    reboot_required: "{{ reboot_required | default(false) or (feature_result.results | default([]) | selectattr('reboot_required', 'defined') | selectattr('reboot_required') | list | length > 0) }}"
+  when: feature_result is defined
+
+- name: 役割と機能エビデンスを出力する
+  ansible.builtin.debug:
+    msg:
+      - "features : {{ VAR_features | default([]) | map(attribute='name') | list }}"
+      - "reboot_required : {{ reboot_required | default(false) }}"

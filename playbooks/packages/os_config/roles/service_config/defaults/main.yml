@@ -1,0 +1,8 @@
+---
+# service_config 既定値
+# VAR_services: 設定対象サービスのリスト（バンドルON）
+#   - name: "サービス名"             # Get-Service の Name
+#     startup_type: disabled         # disabled（既定）/ manual / auto / delayed
+#     state: stopped                 # stopped（既定）/ started
+# disabled にできないサービスは自動的に manual にフォールバックする。
+VAR_services: []

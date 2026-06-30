@@ -1,0 +1,11 @@
+---
+# windows_firewall 既定値
+# VAR_fw_profiles: プロファイル設定のリスト
+#   - state: enabled | disabled
+#     profiles: ["Domain","Private","Public"]
+#     inbound_action: allow | block | notconfigured
+#     outbound_action: allow | block | notconfigured
+# VAR_fw_rules: 個別ルールのリスト（バンドルON）
+#   - name / direction(in|out) / action(allow|block) / protocol / localport / remoteip / profiles / icmp_type_code
+VAR_fw_profiles: []
+VAR_fw_rules: []

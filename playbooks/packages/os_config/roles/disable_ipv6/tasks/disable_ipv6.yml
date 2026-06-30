@@ -1,0 +1,33 @@
+---
+# 種別: IPv6無効化（DisableComponents レジストリ）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_regedit（DWORD作成・設定）/ win_shell（before取得）。
+# 設定: HKLM\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters の DisableComponents。
+#       0xFF = すべてのIPv6コンポーネントを無効化。
+# 再起動: 反映に再起動が必要。変更時 reboot_required を集約。
+# 変数: VAR_ipv6_disablecomponents（既定 0xFF）。
+
+- name: 現在の DisableComponents を取得する（before）
+  ansible.windows.win_shell: |
+    (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters' -Name DisableComponents -ErrorAction SilentlyContinue).DisableComponents
+  register: ipv6_before
+  changed_when: false
+
+- name: DisableComponents を設定してIPv6を無効化する
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Services\Tcpip6\Parameters
+    name: DisableComponents
+    data: "{{ VAR_ipv6_disablecomponents | default('0xFF') }}"
+    type: dword
+    state: present
+  register: ipv6_reg
+
+- name: 再起動要否を集約する
+  ansible.builtin.set_fact:
+    reboot_required: "{{ reboot_required | default(false) or ipv6_reg.changed }}"
+
+- name: IPv6無効化エビデンスを出力する
+  ansible.builtin.debug:
+    msg: >-
+      DisableComponents: before={{ ipv6_before.stdout | default('') | trim | default('(未設定)', true) }}
+      -> {{ VAR_ipv6_disablecomponents | default('0xFF') }} (changed={{ ipv6_reg.changed }})

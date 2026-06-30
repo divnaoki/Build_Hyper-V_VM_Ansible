@@ -1,0 +1,9 @@
+---
+# memory_dump 既定値
+# VAR_dump_type: CrashDumpEnabled の値
+#   1=完全メモリダンプ / 2=カーネルメモリダンプ（推奨） / 3=小メモリダンプ / 7=自動
+# VAR_dump_autoreboot: クラッシュ後の自動再起動（1=有効）
+# VAR_dump_overwrite : 既存ダンプの上書き（1=上書き）
+VAR_dump_type: 2
+VAR_dump_autoreboot: 1
+VAR_dump_overwrite: 1

@@ -1,0 +1,10 @@
+---
+# local_user 既定値
+# VAR_users: 作成するローカルユーザーのリスト（バンドルON）
+#   - name: "ユーザー名"
+#     password: "********"            # 機密（no_log）
+#     groups: ["Administrators"]      # 既定 Administrators
+#     description: "説明"
+#     password_never_expires: true
+#     user_cannot_change_password: false
+VAR_users: []

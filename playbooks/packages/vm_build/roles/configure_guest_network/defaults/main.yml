@@ -1,14 +1,22 @@
 ---
-# configure_guest_network ロール 既定値
-# VAR_vm の基本構造は import_template_vm/defaults/main.yml を参照。
-# 本ロールで参照する VAR_vm メンバー:
+# configure_guest_network ロール 既定値（複数セグメント対応）
+# 本ロールは Windows ゲストに対し、以下を自動で行う:
+#   1) ホスト側で各セグメントの VLAN付き仮想NIC を Internalスイッチ上に作成（アクセスVLAN）
+#   2) ゲスト内で各NIC（MACで特定）に各セグメントのIPを設定
+#   3) ホスト名を VM名（item.name）に設定（変更時は再起動）
+# 接続はすべて PowerShell Direct（Invoke-Command -VMName）。対象は Windows のみ。
+#
+# 参照する VAR_vm メンバー:
 #   - name                       ホスト名としても使用（NetBIOS: 15文字以内・英数推奨）
-#     os_type: windows           Windows のみ実行
-#     guest_admin_user: "Administrator"   PowerShell Direct(Invoke-Command -VMName)用
-#     guest_admin_password: "********"     同上・機密(no_log)
-#     guest_switch_name: "LocalLAN"        IP設定対象NICを特定する仮想スイッチ名（既マウント済み）
-#     guest_ip_address: "192.168.100.11"   設定するIPv4
-#     guest_subnet_prefix: 24              プレフィックス長
-#     guest_default_gateway: ""            既定GW（LocalLAN内部で不要なら空文字）
-#     guest_dns_servers: []                DNS（リスト。空なら自動取得にリセット）
+#     os_type: windows
+#     guest_admin_user: "Administrator"     PowerShell Direct用
+#     guest_admin_password: "********"        同上・機密(no_log)
+#     guest_switch_name: "local LAN"          全セグメント共通の Internal 仮想スイッチ
+#     segments:                               セグメント定義（複数）
+#       - name: "seg-mgmt"    ホスト側vNIC名（VM内で一意）。MAC特定にも使う
+#         vlan_id: 10         アクセスVLAN ID
+#         ip: "192.168.10.2"
+#         prefix: 24
+#         gateway: ""         既定GW（不要なら空文字。複数セグメントでは設定は1つに限定推奨）
+#         dns: []             DNS（リスト。空なら未設定）
 VAR_vm: []

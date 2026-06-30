@@ -1,0 +1,8 @@
+---
+# windows_feature 既定値
+# VAR_features: 役割・機能のリスト（バンドルON）
+#   - name: "機能名"                 # Get-WindowsFeature の Name（表示名ではない）
+#     state: present | absent
+#     include_management_tools: true | false
+#     include_sub_features: true | false
+VAR_features: []

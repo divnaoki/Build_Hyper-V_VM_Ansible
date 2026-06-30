@@ -1,0 +1,45 @@
+---
+# 種別: メモリダンプ設定（カーネルメモリダンプ）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_regedit。
+# 設定: HKLM\SYSTEM\CurrentControlSet\Control\CrashControl
+#       CrashDumpEnabled=2（カーネルメモリダンプ）/ AutoReboot / Overwrite。
+# 再起動: 反映に再起動が必要。CrashDumpEnabled変更時 reboot_required を集約。
+# 変数: VAR_dump_type（既定 2=カーネル）/ VAR_dump_autoreboot / VAR_dump_overwrite。
+
+# [SHOULD-3] before取得: 現在の CrashDumpEnabled をエビデンス用に取得する
+- name: 現在の CrashDumpEnabled を取得する（before）
+  ansible.windows.win_shell: |
+    (Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl' -Name CrashDumpEnabled -ErrorAction SilentlyContinue).CrashDumpEnabled
+  register: dump_before
+  changed_when: false
+
+- name: ダンプ種別を設定する（CrashDumpEnabled）
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl
+    name: CrashDumpEnabled
+    data: "{{ VAR_dump_type | default(2) }}"
+    type: dword
+  register: dump_reg
+
+- name: 自動再起動・上書き設定を行う
+  ansible.windows.win_regedit:
+    path: HKLM:\SYSTEM\CurrentControlSet\Control\CrashControl
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+    type: dword
+  loop:
+    - { name: "AutoReboot", data: "{{ VAR_dump_autoreboot | default(1) }}" }
+    - { name: "Overwrite",  data: "{{ VAR_dump_overwrite | default(1) }}" }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: 再起動要否を集約する
+  ansible.builtin.set_fact:
+    reboot_required: "{{ reboot_required | default(false) or dump_reg.changed }}"
+
+- name: メモリダンプエビデンスを出力する
+  ansible.builtin.debug:
+    msg: >-
+      CrashDumpEnabled: before={{ dump_before.stdout | default('') | trim | default('(未設定)', true) }}
+      -> {{ VAR_dump_type | default(2) }} (1=完全 / 2=カーネル / 3=小) changed={{ dump_reg.changed }}

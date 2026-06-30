@@ -1,0 +1,9 @@
+---
+# windows_firewall 検証用 playbook
+- name: 検証 - windows_firewall
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/windows_firewall/group_vars/main.yml
+  roles:
+    - windows_firewall

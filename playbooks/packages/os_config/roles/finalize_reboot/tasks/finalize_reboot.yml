@@ -1,0 +1,19 @@
+---
+# 種別: 最終再起動（設定反映）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_reboot。
+# 方針: 先行ロール（windows_feature / disable_ipv6 / memory_dump）が集約した reboot_required が
+#       true のときのみ再起動する（末尾で1回）。
+# 変数: reboot_required（先行ロールが set_fact で立てる。未定義なら false）/ VAR_force_reboot。
+
+- name: 設定反映のため再起動する（必要時のみ）
+  ansible.windows.win_reboot:
+    msg: "OS設定の反映のため再起動します"
+    pre_reboot_delay: 5
+    reboot_timeout: 1200
+  when: (reboot_required | default(false) | bool) or (VAR_force_reboot | default(false) | bool)
+
+- name: 再起動不要を通知する
+  ansible.builtin.debug:
+    msg: "再起動は不要でした（reboot_required={{ reboot_required | default(false) }}）"
+  when: not ((reboot_required | default(false) | bool) or (VAR_force_reboot | default(false) | bool))

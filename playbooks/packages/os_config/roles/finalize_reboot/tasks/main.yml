@@ -1,0 +1,3 @@
+---
+- name: 最終再起動タスクを読み込む
+  ansible.builtin.include_tasks: finalize_reboot.yml

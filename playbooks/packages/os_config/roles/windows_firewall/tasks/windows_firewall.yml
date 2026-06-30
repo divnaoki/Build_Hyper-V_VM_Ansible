@@ -1,0 +1,43 @@
+---
+# 種別: Windows ファイアウォール設定（プロファイル＋ルール）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: community.windows.win_firewall（プロファイル）/ win_firewall_rule（ルール）。
+# 冪等: 両モジュールが冪等。再起動不要。
+# 変数: VAR_fw_profiles[]（state / profiles / inbound_action / outbound_action）
+#       VAR_fw_rules[]（name / direction / action / protocol / localport / remoteip / profiles 等）バンドルON。
+
+- name: ファイアウォールプロファイルを設定する
+  community.windows.win_firewall:
+    state: "{{ item.state }}"
+    profiles: "{{ item.profiles }}"
+    inbound_action: "{{ item.inbound_action | default(omit) }}"
+    outbound_action: "{{ item.outbound_action | default(omit) }}"
+  loop: "{{ VAR_fw_profiles | default([]) }}"
+  loop_control:
+    label: "{{ item.profiles }}"
+  when: VAR_fw_profiles | default([]) | length > 0
+
+- name: ファイアウォールルールを設定する
+  community.windows.win_firewall_rule:
+    name: "{{ item.name }}"
+    enabled: "{{ item.enabled | default(true) }}"
+    state: "{{ item.state | default('present') }}"
+    direction: "{{ item.direction }}"
+    action: "{{ item.action }}"
+    protocol: "{{ item.protocol | default(omit) }}"
+    localport: "{{ item.localport | default(omit) }}"
+    remoteport: "{{ item.remoteport | default(omit) }}"
+    remoteip: "{{ item.remoteip | default(omit) }}"
+    icmp_type_code: "{{ item.icmp_type_code | default(omit) }}"
+    profiles: "{{ item.profiles | default(omit) }}"
+    description: "{{ item.description | default(omit) }}"
+  loop: "{{ VAR_fw_rules | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: VAR_fw_rules | default([]) | length > 0
+
+- name: ファイアウォール設定エビデンスを出力する
+  ansible.builtin.debug:
+    msg:
+      - "profiles : {{ VAR_fw_profiles | default([]) | length }} 件設定"
+      - "rules    : {{ VAR_fw_rules | default([]) | map(attribute='name') | list }}"

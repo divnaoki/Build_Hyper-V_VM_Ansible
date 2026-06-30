@@ -1,0 +1,9 @@
+---
+# local_user 検証用 playbook
+- name: 検証 - local_user
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/local_user/group_vars/main.yml
+  roles:
+    - local_user

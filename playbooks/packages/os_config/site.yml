@@ -1,0 +1,20 @@
+---
+# ===========================================================================
+# OS設定パッケージ 統合playbook
+#  全ロールを順に実行し、再起動が必要な変更を reboot_required に集約して
+#  末尾の finalize_reboot で1回だけ再起動する。
+# 実行: ansible-playbook -i inventory.ini site.yml
+# 対象: [targets] の各 Windows Server 2022（直接WinRM）
+# ===========================================================================
+- name: OS設定（Windows Server 2022）
+  hosts: targets
+  gather_facts: false
+  roles:
+    - time_sync
+    - windows_feature
+    - local_user
+    - disable_ipv6
+    - memory_dump
+    - windows_firewall
+    - service_config
+    - finalize_reboot   # reboot_required が true のときのみ再起動

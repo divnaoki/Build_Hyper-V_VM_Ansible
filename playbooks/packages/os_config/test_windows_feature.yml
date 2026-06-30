@@ -1,0 +1,9 @@
+---
+# windows_feature 検証用 playbook
+- name: 検証 - windows_feature
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/windows_feature/group_vars/main.yml
+  roles:
+    - windows_feature

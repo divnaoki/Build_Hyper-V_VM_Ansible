@@ -80,3 +80,86 @@ status: **review**（再レビュー待ち）
     VHDXパス/サイズ取得（Get-VMHardDiskDrive / Get-VHD）、ゲスト内パーティション拡張・疎通待ち（PowerShell Direct）。
 - 参照: hv_vhd は microsoft.hyperv 公式コレクションのモジュール（size_bytes は expansion only）。
 status: **review**（再レビュー待ち・モジュール方針反映済み）
+
+---
+
+## 2026-06-30 OS設定パッケージ（os_config）新規作成（exastro_engineer → PMレビュー依頼）
+- 依頼: Windows Server 2022 ゲストへのOS初期設定パッケージ。対象7テーマ＋末尾再起動。
+- 接続方式: 各VMへ**直接WinRM**（承認済み）。再起動: **末尾で1回**（reboot_required集約・承認済み）。
+- 成果物: `playbooks/packages/os_config/`（site.yml＋8ロール＋各 test_*.yml）
+  - time_sync / windows_feature / local_user / disable_ipv6 / memory_dump / windows_firewall / service_config / finalize_reboot
+- パラメータシート設計: `os-config-parameter-sheet-design.md`
+- モジュールマニュアル運用: 新規8モジュール（win_feature/win_user/win_regedit/win_service/win_reboot/
+  community.windows.win_firewall/win_firewall_rule/win_timezone）をObsidian登録済み（9/9確認）。
+- 構文チェック: site.yml＋全 test_*.yml OK。
+- status: **review**（PMレビュー待ち）
+
+### 主な確認依頼ポイント
+1. 接続方式（直接WinRM）とEC2検証時の到達性（ホスト上でansible実行 or 踏み台）の妥当性。
+2. service_config の disabled→manual フォールバック設計（block/rescue・include_tasksループ）。
+3. 再起動集約（feature/ipv6/dump → finalize_reboot で1回）の妥当性。
+4. 検証値（features/services 等）は例示。実環境の対象リスト確定が残課題。
+
+#### 2026-06-30 PM 1stレビュー結果: **fixing（approved見送り）**
+観点: 冪等性 / 前後状態取得 / 命名規則 / 不要タスク混入
+
+良かった点（OK）:
+- 命名規則・構造（main.yml→include_tasks→<処理名>.yml、_service_one.yml の内部タスク命名、defaults/group_vars/test_*.yml）規約準拠。
+- 専用モジュール（win_feature/win_user/win_regedit/win_service/win_firewall/win_timezone）を適切に選定し、
+  大半のロールはモジュールで冪等性を確保。全win_shell化を避けている点は良い。
+- ユーザパスワードの no_log、reboot_required 集約→末尾1回再起動、フォールバック発想、
+  モジュールマニュアル運用・パラメータシート設計の整備も妥当。
+
+**[MUST-1] time_sync のNTP設定が冪等でない**
+- `w32tm /config` を毎回実行し、changed_when を出力文言（successfully/正常に）で判定しているため、
+  既に同一NTP設定でも**毎回 changed=true** になる。さらに文言はロケール依存で誤判定の懸念。
+- 対応案: 実行前に現NTP設定（`w32tm /query /configuration` の NtpServer/Type）を取得し、
+  目標と一致していれば config をスキップ（when ガード）。または before/after 比較で changed を確定。
+
+**[MUST-2] service_config の disabled→manual フォールバックが実態を拾えない可能性**
+- rescue が発動するのは win_service タスクが**失敗**したときのみ。実際には多くのサービスは
+  `start_mode: disabled` の**設定自体は成功**し（無効化できないのは一部のトリガー開始/保護サービス）、
+  「無効化できない」ケースをタスク失敗として検知できない恐れがある。
+- 対応案: 設定後に実際の start_mode を取得して `disabled` になったか検証し、なっていなければ manual に切替える
+  （rescue だけに依存しない）。実機での挙動確認を必須とする。
+
+**[SHOULD-3] memory_dump に before 取得が無い**
+- disable_ipv6 は before（現 DisableComponents）を取得しているが、memory_dump は現 CrashDumpEnabled の
+  before 取得が無くエビデンスが非対称。一貫性のため before 取得を追加推奨。
+
+**[SHOULD-4] Firewallプロファイル名の大小整合**
+- `win_firewall` は `Domain/Private/Public`、`win_firewall_rule` は `domain/private/public` と表記が混在。
+  各モジュールの受理形式を確認し、group_vars/パラメータシートの記載を統一すること。
+
+**[NIT-5] 個別 test_*.yml（ipv6/dump）は finalize_reboot を含まない**
+- 個別検証では reboot_required を立てても再起動されない（手動再起動が必要）。READMEに一言補足を推奨。
+
+判定: **fixing**。MUST-1/2 を修正し再レビュー依頼のこと。SHOULD-3/4・NIT-5 も対応推奨。
+※ 実機検証（特に MUST-2 のフォールバック動作、冪等性2回実行）は接続環境が整い次第必須。
+
+#### 2026-06-30 exastro_engineer 修正対応（→ 再レビュー依頼 status: review）
+- **[MUST-1] 対応**: time_sync のNTP設定を冪等化。`w32tm /query /configuration` の出力に対し
+  `VAR_ntp_servers | reject('in', before)` で**未設定サーバがある場合のみ** `w32tm /config` を実行（when ガード）。
+  changed は `ntp_config is not skipped` で判定（毎回 changed=true を解消）。resync も設定変更時のみ。
+- **[MUST-2] 対応**: service_config のフォールバックを rescue 依存から「**設定後に実 start_mode を検証**」方式へ。
+  `win_service`（name のみ）で設定後の start_mode を取得し、`disabled` になっていなければ manual に切替え。
+  タスク失敗時の rescue→manual も併存（二重で担保）。
+- **[SHOULD-3] 対応**: memory_dump に現 CrashDumpEnabled の before 取得を追加し、エビデンスを before→after に。
+- **[SHOULD-4] 対応**: Firewallプロファイル名の表記をモジュール仕様（win_firewall=PascalCase /
+  win_firewall_rule=小文字）とコメントで明記。混在ではなく各モジュールの正しい形式であることを補足。
+- **[NIT-5] 対応**: README に「個別 test_ipv6/dump は finalize_reboot 非対象＝手動再起動、一括は site.yml」を補足。
+- 構文チェック: site.yml＋対象 test OK。MUST-1 の reject ロジックは机上検証で冪等動作を確認。
+status: **review**（再レビュー待ち）
+
+#### 2026-06-30 PM 再レビュー結果: **approved（設計レビュー・条件付き）**
+- MUST-1（NTP冪等化）: `reject('in', before)` の when ガード＋`is not skipped` の changed 判定で解消を確認。OK。
+- MUST-2（サービスフォールバック）: 設定後に実 start_mode を取得し `disabled` 不成立なら manual 切替、
+  かつ rescue→manual も併存。rescue 依存の懸念は解消。OK。
+- SHOULD-3（before取得）/ SHOULD-4（大小明記）/ NIT-5（README補足）: いずれも対応確認。OK。
+- 命名規則・構造・不要タスク混入なし。専用モジュール活用による冪等性確保も妥当。
+- **判定: approved（設計レビュー）**。
+- **条件（残必須）**: 接続環境（Hyper-Vホスト上でansible実行 等）が整い次第、**実機検証**を実施すること。
+  特に (a) 冪等性2回実行で changed=false、(b) service_config の disabled→manual フォールバック実動作、
+  (c) finalize_reboot が末尾で1回だけ走ること。
+- **次工程**: Conductor定義（time_sync→…→finalize_reboot）の作成。必要なら基本/詳細設計書を作成し
+  PM approved 後に Obsidian 登録（Playbook自体はObsidian登録しない＝既存方針）。

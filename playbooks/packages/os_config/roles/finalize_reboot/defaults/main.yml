@@ -1,0 +1,4 @@
+---
+# finalize_reboot 既定値
+# VAR_force_reboot: reboot_required に関わらず強制的に再起動する（既定 false）
+VAR_force_reboot: false

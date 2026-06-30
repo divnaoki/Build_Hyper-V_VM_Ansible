@@ -1,0 +1,10 @@
+---
+# time_sync 検証用 playbook
+# 実行: ansible-playbook -i inventory.ini test_time_sync.yml
+- name: 検証 - time_sync
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/time_sync/group_vars/main.yml
+  roles:
+    - time_sync

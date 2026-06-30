@@ -1,0 +1,3 @@
+---
+- name: 役割と機能タスクを読み込む
+  ansible.builtin.include_tasks: windows_feature.yml

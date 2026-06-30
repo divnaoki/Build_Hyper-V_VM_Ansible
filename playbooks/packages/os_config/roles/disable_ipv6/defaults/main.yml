@@ -1,0 +1,6 @@
+---
+# disable_ipv6 既定値
+# VAR_ipv6_disablecomponents: DisableComponents の値（DWORD）。
+#   0xFF       = すべてのIPv6コンポーネントを無効化（推奨）
+#   0x20       = IPv4優先（IPv6は残す）
+VAR_ipv6_disablecomponents: "0xFF"

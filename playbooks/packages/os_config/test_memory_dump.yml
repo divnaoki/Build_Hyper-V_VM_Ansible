@@ -1,0 +1,9 @@
+---
+# memory_dump 検証用 playbook（反映には再起動が必要）
+- name: 検証 - memory_dump
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/memory_dump/group_vars/main.yml
+  roles:
+    - memory_dump

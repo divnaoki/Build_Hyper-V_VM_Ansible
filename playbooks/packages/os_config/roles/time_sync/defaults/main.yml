@@ -1,0 +1,6 @@
+---
+# time_sync 既定値
+# VAR_timezone     : タイムゾーンID（tzutil /l の識別子。例 "Tokyo Standard Time"）。空なら変更しない
+# VAR_ntp_servers  : NTPサーバのリスト（空なら変更しない）
+VAR_timezone: ""
+VAR_ntp_servers: []

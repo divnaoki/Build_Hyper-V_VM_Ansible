@@ -1,0 +1,3 @@
+---
+- name: メモリダンプ設定タスクを読み込む
+  ansible.builtin.include_tasks: memory_dump.yml

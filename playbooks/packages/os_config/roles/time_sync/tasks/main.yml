@@ -1,0 +1,3 @@
+---
+- name: 時刻同期タスクを読み込む
+  ansible.builtin.include_tasks: time_sync.yml

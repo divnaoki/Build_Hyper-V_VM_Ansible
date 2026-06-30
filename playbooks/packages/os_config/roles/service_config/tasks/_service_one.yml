@@ -1,0 +1,42 @@
+---
+# サービス1件の設定（disabled を試行 → 設定後の実 start_mode を検証 → 不可なら manual にフォールバック）
+# [MUST-2] rescue（タスク失敗）だけに依存せず、設定後に実際の start_mode を確認して
+#          目標（既定 disabled）になっていなければ manual に切り替える。
+- name: "{{ svc.name }} を設定する（disabled試行→検証→不可ならmanual）"
+  block:
+    - name: "{{ svc.name }}: start_mode={{ svc.startup_type | default('disabled') }} を設定する"
+      ansible.windows.win_service:
+        name: "{{ svc.name }}"
+        start_mode: "{{ svc.startup_type | default('disabled') }}"
+        state: "{{ svc.state | default('stopped') }}"
+      register: svc_set
+
+    - name: "{{ svc.name }}: 設定後の start_mode を取得する"
+      ansible.windows.win_service:
+        name: "{{ svc.name }}"
+      register: svc_check
+      changed_when: false
+
+    - name: "{{ svc.name }}: disabled にできなかった場合 manual にフォールバックする"
+      ansible.windows.win_service:
+        name: "{{ svc.name }}"
+        start_mode: manual
+      when:
+        - (svc.startup_type | default('disabled')) == 'disabled'
+        - (svc_check.start_mode | default('')) != 'disabled'
+      register: svc_fallback
+
+    - name: "{{ svc.name }}: 結果をエビデンス出力する"
+      ansible.builtin.debug:
+        msg: >-
+          {{ svc.name }}: 要求={{ svc.startup_type | default('disabled') }}
+          / 実際={{ (svc_fallback is defined and svc_fallback is not skipped) | ternary('manual（フォールバック）', svc_check.start_mode | default('?')) }}
+  rescue:
+    - name: "{{ svc.name }}: 設定タスク失敗のため manual にフォールバックする"
+      ansible.windows.win_service:
+        name: "{{ svc.name }}"
+        start_mode: manual
+      register: svc_rescue
+    - name: "{{ svc.name }}: rescueフォールバック完了"
+      ansible.builtin.debug:
+        msg: "{{ svc.name }}: 設定タスクが失敗 → manual にフォールバックしました（changed={{ svc_rescue.changed }})"

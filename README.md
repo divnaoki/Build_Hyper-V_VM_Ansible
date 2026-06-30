@@ -45,7 +45,7 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
-| **configure_guest_network** | ゲストOSのIPアドレスとホスト名を設定する。LocalLAN仮想スイッチに接続されたNIC（MACで特定）にIPを設定し、ホスト名をVM名に変更する（変更時は再起動して反映）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。1つのInternalスイッチ上にセグメントごとの**VLAN付き仮想NIC**（アクセスVLAN）を作成し、各NIC（MACで特定）に各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
 > （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
@@ -134,7 +134,8 @@ VAR_vm:
 # set_vm_memory: name / memory_startup_mb / memory_dynamic / memory_min_mb / memory_max_mb
 # set_vm_disk: name / os_type / os_disk_size_gb / os_disk_drive_letter / guest_admin_user / guest_admin_password
 # start_vm: name
-# configure_guest_network: name / os_type / guest_admin_user / guest_admin_password / guest_switch_name / guest_ip_address / guest_subnet_prefix / guest_default_gateway / guest_dns_servers
+# configure_guest_network: name / os_type / guest_admin_user / guest_admin_password / guest_switch_name /
+#   segments: [ { name, vlan_id, ip, prefix, gateway, dns } , ... ]   ← 複数セグメント（VLAN）をリストで定義
 ```
 
 ### ③ `playbooks/provisioning/group_vars/all.yml`
@@ -226,6 +227,14 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - 拡張の成否判定は **`after >= before`（縮小していなければOK）**。GPT予備領域等で目標サイズちょうどには
   届かないため、目標サイズ厳密一致では判定しない。
 
+### configure_guest_network（複数セグメント / VLAN）
+- 1つの Internalスイッチ上に **セグメントごとのVLAN付き仮想NIC**（アクセスVLAN）をホスト側で作成し、ゲスト内で各NICにIPを設定する。`segments[]` をリストで定義する。
+- **NICの識別はMACで行う**（アクセスVLANはゲストOSから見えないため）。`segments[].name` のvNIC名でホスト側にNICを作り、そのMACでゲスト内NICを特定する。
+- **デフォルトゲートウェイは1セグメントのみ**に設定する（複数GWは経路が不定になり通信が不安定化する）。
+- VLANで論理分離されるため、**ホストから各VMへ疎通確認するにはホスト側にも各VLANの管理OS vNICが必要**（`Add-VMNetworkAdapter -ManagementOS` ＋ `Set-VMNetworkAdapterVlan -Access -VlanId`）。VM内・VM同士の通信だけなら不要。
+- VMにNICを追加するため、`start_vm` の後（VM稼働中）に実行する（Gen2はホットアド対応）。
+- EC2検証では Internalスイッチ内でVLANが閉じるため VPC制約を受けない。本番(オンプレ)で External を使う場合は上位スイッチのトランク設定が必要。
+
 ### AWS検証環境（provisioning）
 - **Hyper-Vのネスト仮想化はベアメタル(`.metal`)インスタンスでのみ可能**。料金が高く起動も遅い（10〜20分）。
   使用後は `terminate_ec2_hyperv.yml` で必ず削除すること。
@@ -236,4 +245,43 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - **Hyper-Vの External 仮想スイッチはプライマリNICを奪い、ホストごとネットワーク不通になる**ことがある
   （AMI化→復元で特に発生）。検証では **Internal/Private 仮想スイッチ**を推奨。外部接続が必要な場合は
   セカンダリENIの追加やホストNAT等の設計が必要。
+
+---
+
+## OS設定パッケージ（os_config）
+
+構築済みの Windows Server 2022 ゲストに対する**OS初期設定**を行うパッケージ。
+`vm_build`（Hyper-Vホスト経由）と異なり、**各VMへ直接WinRM接続**する（Exastro標準）。
+配置: `playbooks/packages/os_config/`。
+
+### ロール一覧（実行順）
+
+| ロール | 説明 | 主な使用モジュール |
+|--------|------|--------------------|
+| **time_sync** | タイムゾーン＋NTP（w32time）による時刻同期 | `win_timezone` / `win_service` / `win_command` |
+| **windows_feature** | 役割と機能のインストール/削除 | `win_feature` |
+| **local_user** | ローカルユーザ作成（既定 Administrators グループに追加） | `win_user` |
+| **disable_ipv6** | IPv6無効化（`DisableComponents` レジストリ DWORD作成） | `win_regedit` |
+| **memory_dump** | カーネルメモリダンプ設定（`CrashControl`） | `win_regedit` |
+| **windows_firewall** | ファイアウォール プロファイル＋ルール | `win_firewall` / `win_firewall_rule` |
+| **service_config** | サービス起動種別設定（`disabled`、不可なら `manual` にフォールバック） | `win_service` |
+| **finalize_reboot** | 末尾で1回だけ再起動（`reboot_required` 集約） | `win_reboot` |
+
+> 再起動が必要な変更（feature/ipv6/dump）は各ロールが `reboot_required` を立て、末尾の `finalize_reboot` で1回だけ再起動する。
+
+### 検証実行
+```bash
+cd playbooks/packages/os_config
+ansible-galaxy collection install -r requirements.yml
+# inventory.ini（各VMの管理IP/Administrator/WinRM）と各 roles/*/group_vars/main.yml を用意
+ansible-playbook -i inventory.ini test_time_sync.yml      # 個別ロール検証
+ansible-playbook -i inventory.ini site.yml                # 全ロール＋末尾再起動
 ```
+
+### 注意点
+- **接続は各VMへ直接WinRM**。EC2検証では対象VMがInternalスイッチで隔離されるため、**Hyper-Vホスト上でansibleを実行**するか、ホストを踏み台にして到達させる。
+- `service_config` は `disabled` にできないサービスを自動的に `manual` にフォールバックする（block/rescue）。
+- `local_user` のパスワードは `no_log` で保護。`disable_ipv6`/`memory_dump` は反映に再起動が必要。
+- 個別の `test_disable_ipv6.yml` / `test_memory_dump.yml` は `finalize_reboot` を含まないため、`reboot_required` を立てても再起動されない（**個別検証では手動で再起動**）。一括反映は `site.yml` を使う。
+- パラメータシート設計は `os-config-parameter-sheet-design.md` を参照。
+- git管理外: `os_config/inventory.ini` / 各 `roles/*/group_vars/main.yml`（`.gitignore` の `**/inventory.ini`・`**/group_vars/main.yml` で既にカバー）。

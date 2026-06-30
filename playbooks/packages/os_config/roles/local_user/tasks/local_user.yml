@@ -1,0 +1,29 @@
+---
+# 種別: ローカルユーザー作成（Administratorsグループに追加）
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_user（冪等）。
+# 機密: password を含むため no_log。エビデンスはユーザー名のみ。
+# 変数: VAR_users[]（name / password / groups（既定 Administrators） / description / flags）バンドルON。
+
+- name: ローカルユーザーを作成しグループに追加する
+  ansible.windows.win_user:
+    name: "{{ item.name }}"
+    password: "{{ item.password }}"
+    groups: "{{ item.groups | default(['Administrators']) }}"
+    groups_action: add
+    state: "{{ item.state | default('present') }}"
+    password_never_expires: "{{ item.password_never_expires | default(true) }}"
+    user_cannot_change_password: "{{ item.user_cannot_change_password | default(false) }}"
+    description: "{{ item.description | default(omit) }}"
+    fullname: "{{ item.fullname | default(omit) }}"
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  no_log: true
+  register: user_result
+
+- name: ユーザー作成エビデンスを出力する（パスワードは出力しない）
+  ansible.builtin.debug:
+    msg:
+      - "users  : {{ VAR_users | default([]) | map(attribute='name') | list }}"
+      - "groups : 既定 Administrators（groups_action=add）"

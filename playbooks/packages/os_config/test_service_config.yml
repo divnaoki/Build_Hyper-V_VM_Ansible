@@ -1,0 +1,9 @@
+---
+# service_config 検証用 playbook（disabled→manualフォールバック確認）
+- name: 検証 - service_config
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/service_config/group_vars/main.yml
+  roles:
+    - service_config

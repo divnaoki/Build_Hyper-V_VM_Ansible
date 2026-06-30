@@ -1,13 +1,12 @@
 ---
-# 種別: ゲストOS構成（IPアドレス＋ホスト名）
+# 種別: ゲストOS構成（複数セグメントIP＋ホスト名）
 # 対象: Hyper-Vホスト（WinRM）。ゲスト内設定は PowerShell Direct（Invoke-Command -VMName）で実施。
-# 接続: 指定の仮想スイッチ（既定 LocalLAN）に接続済みのNICにIPを設定する。NICはMACで特定。
-# ホスト名: VM名（item.name）に設定する。変更時は再起動して反映。
+# 構成: 1つの Internalスイッチ上に、セグメントごとの VLAN付き仮想NIC（アクセスVLAN）を作成し、
+#       ゲスト内で各NIC（MACで特定）に各セグメントのIPを設定する。ホスト名は VM名。
 # 対象OS: Windows のみ（item.os_type == 'windows'）。
-# 冪等性: 現在のIP/ホスト名が目標と一致していれば変更しない。
-# 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は no_log なしで可視化。
-# 変数: VAR_vm。item.name / os_type / guest_admin_user / guest_admin_password /
-#       guest_switch_name / guest_ip_address / guest_subnet_prefix / guest_default_gateway / guest_dns_servers
+# 冪等性: 既存vNICは再作成しない／現在IP・ホスト名が目標と一致なら変更しない。
+# 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は register結果から可視化。
+# 変数: VAR_vm。item.name / os_type / guest_admin_user / guest_admin_password / guest_switch_name / segments[]
 
 # --- 1. ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ） ---
 - name: ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ）
@@ -27,65 +26,68 @@
   changed_when: false
   no_log: true
 
-# --- 2. LocalLAN仮想スイッチに接続されたNICのMACを取得する（ホスト側） ---
-- name: 対象NIC（指定スイッチ接続）のMACを取得する
-  ansible.windows.win_shell: |
-    $a = Get-VMNetworkAdapter -VMName '{{ item.name }}' |
-         Where-Object { $_.SwitchName -eq '{{ item.guest_switch_name | default("LocalLAN") }}' } |
-         Select-Object -First 1
-    if (-not $a) { throw "スイッチ '{{ item.guest_switch_name | default("LocalLAN") }}' に接続されたNICがありません: {{ item.name }}" }
-    $a.MacAddress
-  when: item.os_type == 'windows'
-  loop: "{{ VAR_vm }}"
-  loop_control:
-    label: "{{ item.name }}"
-  register: nic_mac
-  changed_when: false
-
-# --- 3. ゲスト内でIP・ホスト名を設定する（Windowsのみ・PowerShell Direct） ---
-- name: ゲスト内のIPアドレスとホスト名を設定する（Windowsのみ）
+# --- 2. VLAN付きvNIC作成（ホスト）＋ ゲスト内で各セグメントIP・ホスト名を設定（Windowsのみ） ---
+# ホスト操作（Add-VMNetworkAdapter / Set-VMNetworkAdapterVlan）と PowerShell Direct を1スクリプトに統合し、
+# 各vNICのMACでゲスト内NICを特定して設定する。結果（各セグメントの前後・成否）をJSONで返す。
+- name: 複数セグメントのVLAN/IP・ホスト名を設定する（Windowsのみ）
   ansible.windows.win_shell: |
     $ErrorActionPreference = 'Stop'
+    $vm = '{{ item.name }}'
+    $sw = '{{ item.guest_switch_name }}'
+    $segs = @'
+    {{ item.segments | to_json }}
+    '@ | ConvertFrom-Json
+
+    # 1) 各セグメントのVLAN付きvNICを作成し、MACを収集
+    $added = $false
+    $payload = @()
+    foreach ($s in $segs) {
+      if (-not (Get-VMNetworkAdapter -VMName $vm -Name $s.name -ErrorAction SilentlyContinue)) {
+        Add-VMNetworkAdapter -VMName $vm -SwitchName $sw -Name $s.name
+        $added = $true
+      }
+      Set-VMNetworkAdapterVlan -VMName $vm -VMNetworkAdapterName $s.name -Access -VlanId $s.vlan_id
+      $mac = (Get-VMNetworkAdapter -VMName $vm -Name $s.name).MacAddress
+      $payload += [pscustomobject]@{ name = $s.name; mac = $mac; ip = $s.ip; prefix = $s.prefix; gateway = $s.gateway; dns = $s.dns }
+    }
+    if ($added) { Start-Sleep -Seconds 5 }   # 新規vNICがゲストに認識されるのを待つ
+
+    # 2) ゲスト内で各NIC（MAC特定）にIP設定＋ホスト名設定
     $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
     $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
-    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ nic_mac.results[idx].stdout | trim }}', '{{ item.guest_ip_address }}', {{ item.guest_subnet_prefix }}, '{{ item.guest_default_gateway | default("") }}', '{{ item.guest_dns_servers | default([]) | join(",") }}', '{{ item.name }}' -ScriptBlock {
-      param($mac, $ip, $prefix, $gw, $dnsCsv, $newName)
+    $payloadJson = $payload | ConvertTo-Json -Compress
+    Invoke-Command -VMName $vm -Credential $cred -ArgumentList $payloadJson, $vm -ScriptBlock {
+      param($payloadJson, $newName)
       $ErrorActionPreference = 'Stop'
-      # 指定MACのNICを特定（ホスト側12桁とゲスト側XX-XX形式を正規化して比較）
-      $macN = ($mac -replace '[-:]', '').ToUpper()
-      $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
-      if (-not $nic) { throw "対象NICが見つかりません (MAC=$mac)" }
-      $ifIndex = $nic.ifIndex
-      $beforeIp   = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
-      $beforeName = $env:COMPUTERNAME
-
-      # IP設定（現在のIPが目標と異なる時のみ再設定）
-      $ipChanged = $false
-      if ($beforeIp -ne $ip) {
-        Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
-        Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
-        if ($gw) {
-          New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix -DefaultGateway $gw | Out-Null
-        } else {
-          New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $ip -PrefixLength $prefix | Out-Null
+      $items = $payloadJson | ConvertFrom-Json
+      # 単一要素だと配列にならないため正規化
+      if ($items -isnot [System.Array]) { $items = @($items) }
+      $changed = $false
+      $out = @()
+      foreach ($it in $items) {
+        $macN = ($it.mac -replace '[-:]', '').ToUpper()
+        $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
+        if (-not $nic) { $out += [pscustomobject]@{ seg = $it.name; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
+        $ifIndex = $nic.ifIndex
+        $before  = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+        if ($before -ne $it.ip) {
+          Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
+          Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+          if ($it.gateway) {
+            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $it.ip -PrefixLength $it.prefix -DefaultGateway $it.gateway | Out-Null
+          } else {
+            New-NetIPAddress -InterfaceIndex $ifIndex -IPAddress $it.ip -PrefixLength $it.prefix | Out-Null
+          }
+          $changed = $true
         }
-        $ipChanged = $true
+        if ($it.dns) { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses ($it.dns) }
+        $after = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $it.ip } | Select-Object -First 1).IPAddress
+        $out += [pscustomobject]@{ seg = $it.name; vlan_mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
       }
-      # DNS（指定があれば設定、無ければ自動に戻す）
-      if ($dnsCsv) { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses ($dnsCsv -split ',') }
-      else { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ResetServerAddresses }
-
-      # ホスト名（VM名）設定（現在名と異なる時のみ。反映には再起動が必要）
+      # ホスト名（VM名）設定
       $nameChanged = $false
-      if ($beforeName -ne $newName) { Rename-Computer -NewName $newName -Force | Out-Null; $nameChanged = $true }
-
-      $afterIp = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $ip } | Select-Object -First 1).IPAddress
-      [pscustomobject]@{
-        mac = $mac
-        before_ip = $beforeIp; after_ip = $afterIp
-        before_name = $beforeName; after_name = $newName
-        ip_changed = $ipChanged; name_changed = $nameChanged
-      } | ConvertTo-Json -Compress
+      if ($env:COMPUTERNAME -ne $newName) { Rename-Computer -NewName $newName -Force | Out-Null; $nameChanged = $true; $changed = $true }
+      [pscustomobject]@{ segments = $out; name_changed = $nameChanged; changed = $changed } | ConvertTo-Json -Compress -Depth 5
     }
   when: item.os_type == 'windows'
   loop: "{{ VAR_vm }}"
@@ -93,19 +95,18 @@
     label: "{{ item.name }}"
     index_var: idx
   register: guest_net
-  changed_when: '''"ip_changed":true'' in (stdout | default('''')) or ''"name_changed":true'' in (stdout | default(''''))'
-  # no_log: true
+  changed_when: "'\"changed\":true' in (stdout | default(''))"
+  no_log: true
 
-# --- 4. 設定結果の検証（IPが目標どおり設定されたか） ---
-- name: IPアドレスが設定されたことを検証する（Windowsのみ）
+# --- 3. 全セグメントのIP設定が成功したことを検証する（Windowsのみ） ---
+- name: 全セグメントのIP設定を検証する（Windowsのみ）
   ansible.builtin.assert:
     that:
-      - "(guest_net.results[idx].stdout | trim | from_json).after_ip == item.guest_ip_address"
+      - "((guest_net.results[idx].stdout | from_json).segments | selectattr('ok', 'equalto', false) | list | length) == 0"
     fail_msg: >-
-      IP設定に失敗しました: {{ item.name }}
-      (期待={{ item.guest_ip_address }} /
-      実際={{ (guest_net.results[idx].stdout | trim | from_json).after_ip | default('なし') }})
-    success_msg: "IP設定OK: {{ item.name }}（{{ item.guest_ip_address }}/{{ item.guest_subnet_prefix }}）"
+      一部セグメントのIP設定に失敗しました: {{ item.name }}
+      / 詳細: {{ (guest_net.results[idx].stdout | from_json).segments }}
+    success_msg: "全セグメントIP設定OK: {{ item.name }}（{{ item.segments | map(attribute='ip') | join(', ') }}）"
     quiet: true
   when: item.os_type == 'windows'
   loop: "{{ VAR_vm }}"
@@ -113,20 +114,20 @@
     label: "{{ item.name }}"
     index_var: idx
 
-# --- 5. エビデンス出力（IP・ホスト名の前後） ---
-- name: IP・ホスト名設定の前後をエビデンス出力する
+# --- 4. エビデンス出力（セグメント別の前後・ホスト名） ---
+- name: 複数セグメント設定の結果をエビデンス出力する
   ansible.builtin.debug:
     msg:
-      - "vm   : {{ item.name }}"
-      - "ip   : {{ (guest_net.results[idx].stdout | trim | from_json).before_ip | default('-') }} -> {{ (guest_net.results[idx].stdout | trim | from_json).after_ip }}"
-      - "host : {{ (guest_net.results[idx].stdout | trim | from_json).before_name }} -> {{ (guest_net.results[idx].stdout | trim | from_json).after_name }} (reboot_required={{ (guest_net.results[idx].stdout | trim | from_json).name_changed }})"
+      - "vm       : {{ item.name }}"
+      - "segments : {{ (guest_net.results[idx].stdout | from_json).segments }}"
+      - "hostname : -> {{ item.name }} (reboot_required={{ (guest_net.results[idx].stdout | from_json).name_changed }})"
   when: item.os_type == 'windows'
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
     index_var: idx
 
-# --- 6. ホスト名変更を反映するため再起動する（変更時のみ・Windows） ---
+# --- 5. ホスト名変更を反映するため再起動する（変更時のみ・Windows） ---
 - name: ホスト名変更を反映するため再起動する（変更時のみ）
   ansible.windows.win_shell: |
     $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
@@ -134,7 +135,7 @@
     Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ScriptBlock { Restart-Computer -Force }
   when:
     - item.os_type == 'windows'
-    - '''"name_changed":true'' in (guest_net.results[idx].stdout | default(''''))'
+    - "'\"name_changed\":true' in (guest_net.results[idx].stdout | default(''))"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
