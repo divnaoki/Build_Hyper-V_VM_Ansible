@@ -22,7 +22,6 @@
     startup_bytes: "{{ item.memory_startup_mb }}MB"
     minimum_bytes: "{{ item.memory_min_mb }}MB"
     maximum_bytes: "{{ item.memory_max_mb }}MB"
-  when: item.memory_dynamic | bool
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
@@ -33,7 +32,6 @@
     vm_name: "{{ item.name }}"
     dynamic_memory_enabled: false
     startup_bytes: "{{ item.memory_startup_mb }}MB"
-  when: not (item.memory_dynamic | bool)
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
@@ -43,8 +41,8 @@
   ansible.builtin.debug:
     msg:
       - "vm     : {{ item.name }}"
-      - "before : {{ mem_before.results[idx].stdout | trim }}  (startupMB;dynamic)"
-      - "after  : startup={{ item.memory_startup_mb }}MB dynamic={{ item.memory_dynamic }}"
+      - "before : {{ mem_before.results[idx].stdout | trim }}"
+      - "after  : startup={{ item.memory_startup_mb }}MB"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"

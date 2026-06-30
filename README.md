@@ -45,7 +45,7 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
-| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。1つのInternalスイッチ上にセグメントごとの**VLAN付き仮想NIC**（アクセスVLAN）を作成し、各NIC（MACで特定）に各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。各セグメントの仮想NIC（VLAN設定含む）は**テンプレートで追加済み**前提で、`segments[].vlan_id`に一致するVLANの既存vNICをMACで特定し、ゲスト内でそのNICに各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
 > （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
@@ -227,13 +227,14 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - 拡張の成否判定は **`after >= before`（縮小していなければOK）**。GPT予備領域等で目標サイズちょうどには
   届かないため、目標サイズ厳密一致では判定しない。
 
-### configure_guest_network（複数セグメント / VLAN）
-- 1つの Internalスイッチ上に **セグメントごとのVLAN付き仮想NIC**（アクセスVLAN）をホスト側で作成し、ゲスト内で各NICにIPを設定する。`segments[]` をリストで定義する。
-- **NICの識別はMACで行う**（アクセスVLANはゲストOSから見えないため）。`segments[].name` のvNIC名でホスト側にNICを作り、そのMACでゲスト内NICを特定する。
+### configure_guest_network（複数セグメント）
+- **前提**: 各セグメントの仮想NIC（VLAN設定含む）は**テンプレート作成時に追加済み**であること。本ロールは
+  vNICの作成・VLAN設定は**行わない**（既存vNICにIPを設定するのみ）。
+- 各セグメントの**`segments[].vlan_id` に一致するアクセスVLANの既存vNICをホスト側で特定**（`Get-VMNetworkAdapterVlan`）してMACを取得し、ゲスト内でMAC一致のNICにIPを設定する。`segments[]` をリストで定義する。
+- **NICの識別はMACで行う**（アクセスVLANはゲストOSから見えないため。ホスト側でvlan_id→vNIC→MACを解決してゲストに渡す）。
 - **デフォルトゲートウェイは1セグメントのみ**に設定する（複数GWは経路が不定になり通信が不安定化する）。
-- VLANで論理分離されるため、**ホストから各VMへ疎通確認するにはホスト側にも各VLANの管理OS vNICが必要**（`Add-VMNetworkAdapter -ManagementOS` ＋ `Set-VMNetworkAdapterVlan -Access -VlanId`）。VM内・VM同士の通信だけなら不要。
-- VMにNICを追加するため、`start_vm` の後（VM稼働中）に実行する（Gen2はホットアド対応）。
-- EC2検証では Internalスイッチ内でVLANが閉じるため VPC制約を受けない。本番(オンプレ)で External を使う場合は上位スイッチのトランク設定が必要。
+- ホストから各VMへ各セグメントで疎通確認するには、ホスト側にも各VLANの管理OS vNICが必要（`Add-VMNetworkAdapter -ManagementOS` ＋ `Set-VMNetworkAdapterVlan -Access -VlanId`）。VM内・VM同士の通信だけなら不要。
+- ゲスト内設定のみのため `start_vm` の後（VM稼働中）に実行する。
 
 ### AWS検証環境（provisioning）
 - **Hyper-Vのネスト仮想化はベアメタル(`.metal`)インスタンスでのみ可能**。料金が高く起動も遅い（10〜20分）。
