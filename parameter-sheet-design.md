@@ -45,8 +45,7 @@ created: 2026-06-25
 | 8 | 最大メモリ(MB) | `VAR_vm.memory_max_mb` | 数値 | △ | 動的時のみ必須 | 8192 | set_vm_memory |
 | 9 | **OSディスクサイズ(GB)** 🆕 | `VAR_vm.os_disk_size_gb` | 数値 | ○ | テンプレート現サイズ以上の整数 | 100 | **set_vm_disk**。目標VHDXサイズ。現サイズ未満のときのみ拡張（縮小不可） |
 | 10 | **OSドライブレター** 🆕 | `VAR_vm.os_disk_drive_letter` | 文字列 | △ | 1文字 / `^[C-Zc-z]$` | C | **set_vm_disk**。ゲスト内拡張対象（Windowsのみ）。既定 `C` |
-| 11 | 仮想スイッチ名 | `VAR_vm.switch_name` | 文字列 | ○ | – | vSwitch01 | configure_vm_network |
-| 12 | VLAN ID | `VAR_vm.vlan_id` | 数値 | – | 未使用時は空 | （空） | configure_vm_network |
+| 11 | 仮想スイッチ名 | `VAR_vm.switch_name` | 文字列 | ○ | – | vSwitch01 | configure_vm_network ※ |
 | 13 | セキュアブート | `VAR_vm.secure_boot` | プルダウン | ○ | `on`/`off`/`rhel` | on | configure_vm_firmware |
 | 14 | ゲスト管理ユーザー | `VAR_vm.guest_admin_user` | 文字列 | ○ | – | Administrator | PowerShell Direct（set_vm_disk等） |
 | 15 | ゲスト管理パスワード | `VAR_vm.guest_admin_password` | **パスワード** | ○ | 機密(no_log) | ******** | PowerShell Direct（set_vm_disk等） |
@@ -56,6 +55,11 @@ created: 2026-06-25
 | 19 | DNSサーバー | `VAR_vm.guest_dns_servers` | 文字列(カンマ区切り) | △ | Windowsのみ | 192.168.10.1 | configure_vm_network。Playbook側で list 化 |
 
 > 本書の主対象は **#9・#10（🆕 Disk）**。それ以外は既存項目の参考掲載。
+>
+> ※ **VLANは使用しない方針に変更（2026-07-07）**。旧 #12「VLAN ID」項目は削除。
+> ネットワーク関連（#11・#16〜#19）は configure_guest_network の複数セグメント化
+> （`VAR_vm.segments[]`＝switch_name / ip / prefix / gateway / dns、vNICは接続先スイッチ名で特定）に
+> 合わせた再設計が必要（縦持ちの別シート想定・別途改訂）。
 
 ---
 

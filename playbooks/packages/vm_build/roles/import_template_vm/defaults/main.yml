@@ -11,8 +11,7 @@
 #     memory_dynamic: false      # VAR_vm.memory_dynamic
 #     memory_min_mb: 2048        # VAR_vm.memory_min_mb（動的時のみ）
 #     memory_max_mb: 8192        # VAR_vm.memory_max_mb（動的時のみ）
-#     switch_name: "vSwitch01"   # VAR_vm.switch_name
-#     vlan_id: ""                # VAR_vm.vlan_id（未使用時は空）
+#     switch_name: "vSwitch01"   # VAR_vm.switch_name（VLANは使用しない。セグメント分離はスイッチ単位）
 #     secure_boot: "on"          # VAR_vm.secure_boot  on / off / rhel
 #     guest_admin_user: "Administrator"     # VAR_vm.guest_admin_user
 #     guest_admin_password: "********"       # VAR_vm.guest_admin_password（機密・no_log）

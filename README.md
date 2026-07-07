@@ -45,7 +45,7 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
-| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。各セグメントの仮想NIC（VLAN設定含む）は**テンプレートで追加済み**前提で、`segments[].vlan_id`に一致するVLANの既存vNICをMACで特定し、ゲスト内でそのNICに各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。セグメント=仮想スイッチ1:1（**VLAN不使用**）で、各セグメントの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。`segments[].switch_name`に一致する接続先スイッチの既存vNICをMACで特定し、ゲスト内でそのNICに各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
 > （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
@@ -134,8 +134,8 @@ VAR_vm:
 # set_vm_memory: name / memory_startup_mb / memory_dynamic / memory_min_mb / memory_max_mb
 # set_vm_disk: name / os_type / os_disk_size_gb / os_disk_drive_letter / guest_admin_user / guest_admin_password
 # start_vm: name
-# configure_guest_network: name / os_type / guest_admin_user / guest_admin_password / guest_switch_name /
-#   segments: [ { name, vlan_id, ip, prefix, gateway, dns } , ... ]   ← 複数セグメント（VLAN）をリストで定義
+# configure_guest_network: name / os_type / guest_admin_user / guest_admin_password /
+#   segments: [ { name, switch_name, ip, prefix, gateway, dns } , ... ]   ← 複数セグメント（スイッチ1:1）をリストで定義
 ```
 
 ### ③ `playbooks/provisioning/group_vars/all.yml`
@@ -228,12 +228,18 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
   届かないため、目標サイズ厳密一致では判定しない。
 
 ### configure_guest_network（複数セグメント）
-- **前提**: 各セグメントの仮想NIC（VLAN設定含む）は**テンプレート作成時に追加済み**であること。本ロールは
-  vNICの作成・VLAN設定は**行わない**（既存vNICにIPを設定するのみ）。
-- 各セグメントの**`segments[].vlan_id` に一致するアクセスVLANの既存vNICをホスト側で特定**（`Get-VMNetworkAdapterVlan`）してMACを取得し、ゲスト内でMAC一致のNICにIPを設定する。`segments[]` をリストで定義する。
-- **NICの識別はMACで行う**（アクセスVLANはゲストOSから見えないため。ホスト側でvlan_id→vNIC→MACを解決してゲストに渡す）。
+- **前提**: セグメントと仮想スイッチは**1:1**（**VLANは使用しない**）。各セグメントの仮想NICは
+  **テンプレート作成時に追加・スイッチ接続済み**であること。本ロールは vNICの作成・スイッチ接続は
+  **行わない**（既存vNICにIPを設定するのみ）。
+- 各セグメントの**`segments[].switch_name` に一致する接続先スイッチの既存vNICをホスト側で特定**
+  （`Get-VMNetworkAdapter` の `SwitchName`）してMACを取得し、ゲスト内でMAC一致のNICにIPを設定する。
+  `segments[]` をリストで定義する。
+- **NICの識別はMACで行う**（接続先スイッチはゲストOSから見えないため。ホスト側でswitch_name→vNIC→MACを解決してゲストに渡す）。
+- **1スイッチ1vNIC前提**。同一スイッチに複数vNICが接続されている場合は構成不正として fail する
+  （黙って誤ったNICに設定しない）。
 - **デフォルトゲートウェイは1セグメントのみ**に設定する（複数GWは経路が不定になり通信が不安定化する）。
-- ホストから各VMへ各セグメントで疎通確認するには、ホスト側にも各VLANの管理OS vNICが必要（`Add-VMNetworkAdapter -ManagementOS` ＋ `Set-VMNetworkAdapterVlan -Access -VlanId`）。VM内・VM同士の通信だけなら不要。
+- ホストから各VMへ各セグメントで疎通確認するには、ホスト側にも各スイッチの管理OS vNICが必要
+  （Internalスイッチなら既定で作成される。Privateスイッチはホストから疎通不可）。VM内・VM同士の通信だけなら不要。
 - ゲスト内設定のみのため `start_vm` の後（VM稼働中）に実行する。
 
 ### AWS検証環境（provisioning）

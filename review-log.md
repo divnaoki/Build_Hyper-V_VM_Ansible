@@ -163,3 +163,21 @@ status: **review**（再レビュー待ち）
   (c) finalize_reboot が末尾で1回だけ走ること。
 - **次工程**: Conductor定義（time_sync→…→finalize_reboot）の作成。必要なら基本/詳細設計書を作成し
   PM approved 後に Obsidian 登録（Playbook自体はObsidian登録しない＝既存方針）。
+
+---
+
+## 2026-07-07 configure_guest_network 仕様変更: VLAN廃止（オーナー指示）
+- 指示: VLANは使わないことになったため、configure_guest_network のVLAN依存処理を修正。
+- 方針（オーナー確認済み）: セグメント=仮想スイッチ1:1とし、vNICの特定を
+  「アクセスVLAN ID一致（`Get-VMNetworkAdapterVlan`）」→「**接続先スイッチ名一致**（`Get-VMNetworkAdapter` の SwitchName）」に変更。
+- 変更内容:
+  - `roles/configure_guest_network/tasks/configure_guest_network.yml`:
+    `segments[].vlan_id` → `segments[].switch_name` でvNIC特定。同一スイッチに複数vNICは構成不正として fail
+    （1スイッチ1vNIC前提・黙って誤設定しない）。出力キー vlan_id → switch。
+  - `roles/configure_guest_network/defaults/main.yml` / `group_vars/main.yml`（検証値）: segments を switch_name 方式に更新。
+  - `roles/import_template_vm/defaults/main.yml`: 参考レコード構造から vlan_id を削除。
+  - `README.md`: ロール一覧・注意点・group_vars例のVLAN記述をスイッチ1:1方式に書き換え。
+  - `parameter-sheet-design.md`: 旧 #12「VLAN ID」削除。ネットワーク項目（#11・#16〜19）は
+    segments[] 対応の再設計が必要である旨を注記（別途改訂）。
+- 検証: `ansible-playbook test_configure_guest_network.yml --syntax-check` OK。実機検証は未実施（環境起動時に要実施）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**（set_vm_disk 再レビューと併せて）。

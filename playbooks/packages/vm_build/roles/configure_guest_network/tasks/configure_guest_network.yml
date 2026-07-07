@@ -1,14 +1,15 @@
 ---
 # 種別: ゲストOS構成（複数セグメントIP＋ホスト名）
 # 対象: Hyper-Vホスト（WinRM）。ゲスト内設定は PowerShell Direct（Invoke-Command -VMName）で実施。
-# 前提: 各セグメントの仮想NIC（VLAN設定含む）はテンプレート作成時に追加・VLAN割当済み（マウント済み）。
-#       本ロールはvNICの作成・VLAN設定は行わず、segments[].vlan_id に一致するVLANの既存vNICを
-#       MACで特定して各セグメントのIPを設定する。
-# 構成: 各セグメントの vlan_id に一致する既存vNICのMACをホスト側で取得し、ゲスト内でMAC一致のNICにIPを設定。ホスト名は VM名。
+# 前提: 各セグメントの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）。
+#       セグメントと仮想スイッチは1:1（VLANは使用しない）。1つのスイッチに接続するvNICはVMごとに1つ。
+#       本ロールはvNICの作成・スイッチ接続は行わず、segments[].switch_name に一致する接続先スイッチの
+#       既存vNICをMACで特定して各セグメントのIPを設定する。
+# 構成: 各セグメントの switch_name に一致する既存vNICのMACをホスト側で取得し、ゲスト内でMAC一致のNICにIPを設定。ホスト名は VM名。
 # 対象OS: Windows のみ（item.os_type == 'windows'）。
 # 冪等性: 現在IP・ホスト名が目標と一致なら変更しない。
 # 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は register結果から可視化。
-# 変数: VAR_vm。item.name / os_type / guest_admin_user / guest_admin_password / segments[]（vlan_id / ip / prefix / gateway / dns）
+# 変数: VAR_vm。item.name / os_type / guest_admin_user / guest_admin_password / segments[]（switch_name / ip / prefix / gateway / dns）
 
 # --- 1. ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ） ---
 - name: ゲストOSのPowerShell Direct疎通を待機する（Windowsのみ）
@@ -28,8 +29,8 @@
   changed_when: false
   # no_log: true
 
-# --- 2. vlan_id一致の既存vNICをMAC特定（ホスト）＋ ゲスト内で各セグメントIP・ホスト名を設定（Windowsのみ） ---
-# segments[].vlan_id に一致するアクセスVLANの既存vNICを探してMACを取得し、
+# --- 2. switch_name一致の既存vNICをMAC特定（ホスト）＋ ゲスト内で各セグメントIP・ホスト名を設定（Windowsのみ） ---
+# segments[].switch_name に一致する接続先スイッチの既存vNICを探してMACを取得し、
 # PowerShell Direct でゲスト内のMAC一致NICにIPを設定する。結果（各セグメントの前後・成否）をJSONで返す。
 - name: 複数セグメントのIP・ホスト名を設定する（Windowsのみ）
   ansible.windows.win_shell: |
@@ -39,16 +40,14 @@
     {{ item.segments | to_json }}
     '@ | ConvertFrom-Json
 
-    # 1) 各セグメントの vlan_id に一致する既存vNICのMACを収集する（作成・VLAN設定はしない）
+    # 1) 各セグメントの switch_name に一致する既存vNICのMACを収集する（作成・スイッチ接続はしない）
+    #    セグメント=スイッチ1:1前提のため、同一スイッチに複数vNICが接続されている場合は構成不正として fail する
     $payload = @()
     foreach ($s in $segs) {
-      $match = $null
-      foreach ($a in (Get-VMNetworkAdapter -VMName $vm)) {
-        $v = Get-VMNetworkAdapterVlan -VMNetworkAdapter $a
-        if ($v.OperationMode -eq 'Access' -and [int]$v.AccessVlanId -eq [int]$s.vlan_id) { $match = $a; break }
-      }
-      if (-not $match) { throw "VLAN ID $($s.vlan_id) のvNICが見つかりません（テンプレートで設定済みのはず）: $vm" }
-      $payload += [pscustomobject]@{ vlan_id = $s.vlan_id; mac = $match.MacAddress; ip = $s.ip; prefix = $s.prefix; gateway = $s.gateway; dns = $s.dns }
+      $match = @(Get-VMNetworkAdapter -VMName $vm | Where-Object { $_.SwitchName -eq $s.switch_name })
+      if ($match.Count -eq 0) { throw "スイッチ '$($s.switch_name)' に接続されたvNICが見つかりません（テンプレートで接続済みのはず）: $vm" }
+      if ($match.Count -gt 1) { throw "スイッチ '$($s.switch_name)' に複数のvNICが接続されています（1スイッチ1vNIC前提。テンプレート構成を確認）: $vm" }
+      $payload += [pscustomobject]@{ switch = $s.switch_name; mac = $match[0].MacAddress; ip = $s.ip; prefix = $s.prefix; gateway = $s.gateway; dns = $s.dns }
     }
 
     # 2) ゲスト内で各NIC（MAC特定）にIP設定＋ホスト名設定
@@ -66,7 +65,7 @@
       foreach ($it in $items) {
         $macN = ($it.mac -replace '[-:]', '').ToUpper()
         $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
-        if (-not $nic) { $out += [pscustomobject]@{ vlan_id = $it.vlan_id; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
+        if (-not $nic) { $out += [pscustomobject]@{ switch = $it.switch; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
         $ifIndex = $nic.ifIndex
         $before  = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
         if ($before -ne $it.ip) {
@@ -81,7 +80,7 @@
         }
         if ($it.dns) { Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses ($it.dns) }
         $after = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $it.ip } | Select-Object -First 1).IPAddress
-        $out += [pscustomobject]@{ vlan_id = $it.vlan_id; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
+        $out += [pscustomobject]@{ switch = $it.switch; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
       }
       # ホスト名（VM名）設定
       $nameChanged = $false
