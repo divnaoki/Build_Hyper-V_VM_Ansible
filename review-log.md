@@ -216,3 +216,25 @@ status: **review**（再レビュー待ち）
 - モジュール構成変更なし（win_shell/assert/debug）→ モジュールマニュアル対応不要。
 - 検証: 未実施（syntax-check・実機検証は環境起動時に要実施）。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-10 configure_guest_network 変数構造変更: 固定3LAN化（Exastro代入値自動登録対応・オーナー指示）
+- 背景: Exastro Legacy Role の代入値自動登録は可変長配列が扱いにくいため、segments を固定キー構成に変更。
+- 新構造（オーナー確認済み・switch名はdefaults固定マッピング方式を選択）:
+  - **代入値**: `VAR_vm.segments[0]` の固定キー
+    `sv_lan_ip / sv_lan_prefix / mgmt_lan_ip / mgmt_lan_prefix / bk_lan_ip / bk_lan_prefix`（サーバ/管理/バックアップの3LAN）。
+  - **環境固定**: LAN種別→仮想スイッチ名は `switch_map`（defaults/main.yml。sv_lan/mgmt_lan/bk_lan）で解決。代入値ではない。
+- 変更ファイル:
+  - `tasks/configure_guest_network.yml`: segmentsループ廃止→固定3LANを内部リストに展開。switch_map でスイッチ名解決し
+    vNICをMAC特定。prefixは[int]化。エビデンスに lan 種別を付与。win_shellの処理説明コメントは維持。
+  - `defaults/main.yml`: `switch_map`（sv_lan:sw-biz / mgmt_lan:sw-mgmt / bk_lan:sw-bk ＝プレースホルダ、実環境で上書き）を追加。
+    変数コメントを固定キー構成に更新。
+  - `group_vars/main.yml`: 検証値を固定キー構成（segments[0]）に更新。
+  - `tasks/main.yml`: include のタスク名から前回の名残「・ホスト名設定」を除去。
+  - `parameter-sheet-design.md`: ネットワーク項目（#11・#16〜19）の注記を固定3LAN＋switch_map方式に更新（gateway/dns/ホスト名廃止）。
+  - `README.md`: ロール一覧・実行コマンド注記・変数早見・詳細節（4箇所）を固定3LAN構造に更新。
+- 補足: 各LANのスイッチ名（switch_map）は実環境値へ要差し替え。os_type は他ロール参照可能性のため残置。
+- モジュール構成変更なし（win_shell/assert/debug）→ モジュールマニュアル対応不要。
+- 検証: 未実施（syntax-check・実機検証は環境起動時に要実施。特に代入値prefixの型・segments[0]前提を確認）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。

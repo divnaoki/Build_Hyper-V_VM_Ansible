@@ -57,9 +57,13 @@ created: 2026-06-25
 > 本書の主対象は **#9・#10（🆕 Disk）**。それ以外は既存項目の参考掲載。
 >
 > ※ **VLANは使用しない方針に変更（2026-07-07）**。旧 #12「VLAN ID」項目は削除。
-> ネットワーク関連（#11・#16〜#19）は configure_guest_network の複数セグメント化
-> （`VAR_vm.segments[]`＝switch_name / ip / prefix / gateway / dns、vNICは接続先スイッチ名で特定）に
-> 合わせた再設計が必要（縦持ちの別シート想定・別途改訂）。
+> ※ **configure_guest_network を固定3LAN構成に変更（2026-07-10）**。ネットワーク関連（#11・#16〜#19）は
+> 以下に置き換わる（gateway / dns / ホスト名設定は廃止）:
+> - **代入値（Exastro Legacy Role）**: `VAR_vm.segments[0]` の固定キー
+>   `sv_lan_ip` / `sv_lan_prefix` / `mgmt_lan_ip` / `mgmt_lan_prefix` / `bk_lan_ip` / `bk_lan_prefix`。
+> - **環境固定（代入値ではない）**: LAN種別→仮想スイッチ名は defaults の `switch_map`
+>   （`sv_lan` / `mgmt_lan` / `bk_lan`）で定義。旧 #11「仮想スイッチ名」は代入値から外れる。
+> - vNICは switch_map のスイッチ名で特定（MAC突き合わせ）。旧 #18「デフォルトGW」・#19「DNS」は不使用。
 
 ---
 

@@ -1,14 +1,19 @@
 ---
-# 種別: ゲストOS構成（複数セグメントIP）
+# 種別: ゲストOS構成（固定3セグメントIP：サーバLAN / 管理LAN / バックアップLAN）
 # 対象: Hyper-Vホスト（WinRM）。ゲスト内設定は PowerShell Direct（Invoke-Command -VMName）で実施。
-# 前提: 各セグメントの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）。
-#       セグメントと仮想スイッチは1:1（VLANは使用しない）。1つのスイッチに接続するvNICはVMごとに1つ。
-#       本ロールはvNICの作成・スイッチ接続は行わず、segments[].switch_name に一致する接続先スイッチの
-#       既存vNICをMACで特定して各セグメントのIPを設定する。
-# 構成: 各セグメントの switch_name に一致する既存vNICのMACをホスト側で取得し、ゲスト内でMAC一致のNICにIPを設定。
+# 前提: 各LANの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）。
+#       LANと仮想スイッチは1:1（VLANは使用しない）。1つのスイッチに接続するvNICはVMごとに1つ。
+#       本ロールはvNICの作成・スイッチ接続は行わず、各LANの接続先スイッチ（switch_map）に一致する
+#       既存vNICをMACで特定して各LANのIPを設定する。
+# 構成: LAN種別→接続先スイッチ名の対応は switch_map（defaults/main.yml・環境固定）で解決。
+#       ip/prefix は Exastro 代入値（segments）から取得する。
 # 冪等性: 現在IPが目標と一致なら変更しない。
 # 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は register結果から可視化。
-# 変数: VAR_vm。item.name / guest_admin_user / guest_admin_password / segments[]（switch_name / ip / prefix）
+# 変数:
+#   VAR_vm[]  : item.name / guest_admin_user / guest_admin_password / segments[0]
+#   segments[0]（Exastro代入値・固定キー）:
+#     sv_lan_ip / sv_lan_prefix / mgmt_lan_ip / mgmt_lan_prefix / bk_lan_ip / bk_lan_prefix
+#   switch_map（defaults・環境固定）: sv_lan / mgmt_lan / bk_lan → 接続先の仮想スイッチ名
 
 # --- 1. ゲストOSのPowerShell Direct疎通を待機する ---
 - name: ゲストOSのPowerShell Direct疎通を待機する
@@ -31,30 +36,42 @@
   changed_when: false
   # no_log: true
 
-# --- 2. switch_name一致の既存vNICをMAC特定（ホスト）＋ ゲスト内で各セグメントIPを設定 ---
-# segments[].switch_name に一致する接続先スイッチの既存vNICを探してMACを取得し、
-# PowerShell Direct でゲスト内のMAC一致NICにIPを設定する。結果（各セグメントの前後・成否）をJSONで返す。
-- name: 複数セグメントのIPを設定する
+# --- 2. LAN種別→スイッチ名でvNICをMAC特定（ホスト）＋ ゲスト内で各LANのIPを設定 ---
+# switch_map で各LAN（サーバ/管理/バックアップ）の接続先スイッチ名を解決し、そのスイッチに接続された
+# 既存vNICのMACをホスト側で取得。PowerShell Direct でゲスト内のMAC一致NICにIPを設定し、結果をJSONで返す。
+- name: 固定3LAN（サーバ/管理/バックアップ）のIPを設定する
   ansible.windows.win_shell: |
     $ErrorActionPreference = 'Stop'
     $vm = '{{ item.name }}'
-    # このVMのセグメント定義（switch_name / ip / prefix の配列）をJSON経由でPowerShellオブジェクトに展開する。
+    # このVMの代入値（segments 配列の先頭要素。sv_lan_ip 等の固定キーを持つ）をJSON経由で展開する。
     # ヒアドキュメント（@' '@）で囲むことで、値内の記号やクォートをそのまま安全に渡す。
-    $segs = @'
-    {{ item.segments | to_json }}
+    $seg = @'
+    {{ item.segments[0] | to_json }}
+    '@ | ConvertFrom-Json
+    # LAN種別→接続先スイッチ名の固定マッピング（environment依存の定数）を展開する。
+    $map = @'
+    {{ switch_map | to_json }}
     '@ | ConvertFrom-Json
 
-    # 1) ホスト側で、各セグメントの switch_name に一致する既存vNICを探しMACアドレスを収集する（vNICの作成・スイッチ接続はしない）。
+    # 固定キーの代入値を、共通処理しやすいよう「LAN種別・スイッチ名・IP・プレフィックス」の内部リストに正規化する。
+    # スイッチ名は switch_map から、IP/プレフィックスは代入値(segments)から取る。prefix はint化しておく（New-NetIPAddress用）。
+    $lans = @(
+      [pscustomobject]@{ lan='sv_lan';   switch=$map.sv_lan;   ip=$seg.sv_lan_ip;   prefix=[int]$seg.sv_lan_prefix },
+      [pscustomobject]@{ lan='mgmt_lan'; switch=$map.mgmt_lan; ip=$seg.mgmt_lan_ip; prefix=[int]$seg.mgmt_lan_prefix },
+      [pscustomobject]@{ lan='bk_lan';   switch=$map.bk_lan;   ip=$seg.bk_lan_ip;   prefix=[int]$seg.bk_lan_prefix }
+    )
+
+    # 1) ホスト側で、各LANのスイッチ名に一致する既存vNICを探しMACアドレスを収集する（vNICの作成・スイッチ接続はしない）。
     #    ゲスト内ではNIC名が一定しないため、ホスト側で確定できる「MACアドレス」を突き合わせキーとして使う。
-    #    セグメント=スイッチ1:1前提のため、一致vNICが 0個（未接続）または 2個以上（多重接続）なら構成不正として throw し、
+    #    LAN=スイッチ1:1前提のため、一致vNICが 0個（未接続）または 2個以上（多重接続）なら構成不正として throw し、
     #    誤ったNICに黙ってIPを振ることを防ぐ。
     $payload = @()
-    foreach ($s in $segs) {
-      $match = @(Get-VMNetworkAdapter -VMName $vm | Where-Object { $_.SwitchName -eq $s.switch_name })
-      if ($match.Count -eq 0) { throw "スイッチ '$($s.switch_name)' に接続されたvNICが見つかりません（テンプレートで接続済みのはず）: $vm" }
-      if ($match.Count -gt 1) { throw "スイッチ '$($s.switch_name)' に複数のvNICが接続されています（1スイッチ1vNIC前提。テンプレート構成を確認）: $vm" }
-      # ゲストに渡す最小限の情報（対応スイッチ名／MAC／設定IP／プレフィックス長）を1件ずつ積む
-      $payload += [pscustomobject]@{ switch = $s.switch_name; mac = $match[0].MacAddress; ip = $s.ip; prefix = $s.prefix }
+    foreach ($s in $lans) {
+      $match = @(Get-VMNetworkAdapter -VMName $vm | Where-Object { $_.SwitchName -eq $s.switch })
+      if ($match.Count -eq 0) { throw "LAN '$($s.lan)' のスイッチ '$($s.switch)' に接続されたvNICが見つかりません（テンプレートで接続済みのはず）: $vm" }
+      if ($match.Count -gt 1) { throw "LAN '$($s.lan)' のスイッチ '$($s.switch)' に複数のvNICが接続されています（1スイッチ1vNIC前提。テンプレート構成を確認）: $vm" }
+      # ゲストに渡す最小限の情報（LAN種別／スイッチ名／MAC／設定IP／プレフィックス長）を1件ずつ積む
+      $payload += [pscustomobject]@{ lan = $s.lan; switch = $s.switch; mac = $match[0].MacAddress; ip = $s.ip; prefix = $s.prefix }
     }
 
     # 2) 収集したMAC＋IP情報をゲスト内に渡し、PowerShell Direct 経由でMAC一致のNICにIPを設定する。
@@ -70,13 +87,13 @@
       $items = $payloadJson | ConvertFrom-Json
       if ($items -isnot [System.Array]) { $items = @($items) }
       $changed = $false   # 1つでもIP変更が発生したか（changed_when 判定に使う）
-      $out = @()          # セグメントごとの結果（前後IP・成否）を貯めるエビデンス配列
+      $out = @()          # LANごとの結果（前後IP・成否）を貯めるエビデンス配列
       foreach ($it in $items) {
         # MACアドレスの区切り記号（- や :）を除去し大文字化して、ゲスト内NICと突き合わせる
         $macN = ($it.mac -replace '[-:]', '').ToUpper()
         $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
-        # 該当MACのNICが見つからなければ、このセグメントは失敗として記録し次へ（他セグメントの設定は続行）
-        if (-not $nic) { $out += [pscustomobject]@{ switch = $it.switch; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
+        # 該当MACのNICが見つからなければ、このLANは失敗として記録し次へ（他LANの設定は続行）
+        if (-not $nic) { $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
         $ifIndex = $nic.ifIndex
         # 設定前の現IPを控える（冪等性判定とエビデンス用）
         $before  = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
@@ -88,9 +105,9 @@
         }
         # 設定後IPを再取得し、目標IPが実際に付いているか（ok）を確認してエビデンスに残す
         $after = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $it.ip } | Select-Object -First 1).IPAddress
-        $out += [pscustomobject]@{ switch = $it.switch; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
+        $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
       }
-      # 全セグメントの結果と変更有無をJSONで返す（ホスト側の assert / debug / changed_when がこれを解析する）
+      # 全LANの結果と変更有無をJSONで返す（ホスト側の assert / debug / changed_when がこれを解析する）
       [pscustomobject]@{ segments = $out; changed = $changed } | ConvertTo-Json -Compress -Depth 5
     }
   loop: "{{ VAR_vm }}"
@@ -101,23 +118,23 @@
   changed_when: '''"changed":true'' in (stdout | default(''''))'
   no_log: true
 
-# --- 3. 全セグメントのIP設定が成功したことを検証する ---
-- name: 全セグメントのIP設定を検証する
+# --- 3. 全LANのIP設定が成功したことを検証する ---
+- name: 全LANのIP設定を検証する
   ansible.builtin.assert:
     that:
       - "((guest_net.results[idx].stdout | from_json).segments | selectattr('ok', 'equalto', false) | list | length) == 0"
     fail_msg: >-
-      一部セグメントのIP設定に失敗しました: {{ item.name }}
+      一部LANのIP設定に失敗しました: {{ item.name }}
       / 詳細: {{ (guest_net.results[idx].stdout | from_json).segments }}
-    success_msg: "全セグメントIP設定OK: {{ item.name }}（{{ item.segments | map(attribute='ip') | join(', ') }}）"
+    success_msg: "全LAN IP設定OK: {{ item.name }}"
     quiet: true
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
     index_var: idx
 
-# --- 4. エビデンス出力（セグメント別の前後） ---
-- name: 複数セグメント設定の結果をエビデンス出力する
+# --- 4. エビデンス出力（LAN別の前後） ---
+- name: 固定3LAN設定の結果をエビデンス出力する
   ansible.builtin.debug:
     msg:
       - "vm       : {{ item.name }}"

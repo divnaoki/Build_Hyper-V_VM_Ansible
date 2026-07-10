@@ -45,7 +45,7 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
-| **configure_guest_network** | ゲストOSに**複数セグメント**のIPアドレスとホスト名を設定する。セグメント=仮想スイッチ1:1（**VLAN不使用**）で、各セグメントの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。`segments[].switch_name`に一致する接続先スイッチの既存vNICをMACで特定し、ゲスト内でそのNICに各セグメントのIPを設定、ホスト名をVM名に変更する（変更時は再起動）。接続は PowerShell Direct。Windowsのみ。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **configure_guest_network** | ゲストOSに**固定3LAN**（サーバ/管理/バックアップ）のIPアドレスを設定する。LAN=仮想スイッチ1:1（**VLAN不使用**）で、各LANの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。LAN種別→スイッチ名は defaults の `switch_map` で解決し、その接続先スイッチの既存vNICをMACで特定して、ゲスト内でそのNICに各LANのIP（`segments[0].{sv,mgmt,bk}_lan_ip/prefix`）を設定する。接続は PowerShell Direct。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
 > （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
@@ -75,7 +75,7 @@ ansible-playbook -i inventory.ini test_set_vm_cpu.yml           # vCPU設定
 ansible-playbook -i inventory.ini test_set_vm_memory.yml        # メモリ設定
 ansible-playbook -i inventory.ini test_start_vm.yml                 # VM起動
 ansible-playbook -i inventory.ini test_set_vm_disk.yml             # OSディスク拡張（起動後）
-ansible-playbook -i inventory.ini test_configure_guest_network.yml # IP・ホスト名設定（起動後）
+ansible-playbook -i inventory.ini test_configure_guest_network.yml # 固定3LAN IP設定（起動後）
 ```
 
 各 `test_*.yml` は `vars_files` で対応する `roles/<role>/group_vars/main.yml` を読み込みます
@@ -135,7 +135,8 @@ VAR_vm:
 # set_vm_disk: name / os_type / os_disk_size_gb / os_disk_drive_letter / guest_admin_user / guest_admin_password
 # start_vm: name
 # configure_guest_network: name / os_type / guest_admin_user / guest_admin_password /
-#   segments: [ { name, switch_name, ip, prefix, gateway, dns } , ... ]   ← 複数セグメント（スイッチ1:1）をリストで定義
+#   segments: [ { sv_lan_ip, sv_lan_prefix, mgmt_lan_ip, mgmt_lan_prefix, bk_lan_ip, bk_lan_prefix } ]  ← 固定3LAN（配列先頭[0]・固定キー）
+#   ※ LAN種別→スイッチ名は defaults の switch_map（sv_lan/mgmt_lan/bk_lan）で解決（環境固定・代入値ではない）
 ```
 
 ### ③ `playbooks/provisioning/group_vars/all.yml`
@@ -227,18 +228,20 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - 拡張の成否判定は **`after >= before`（縮小していなければOK）**。GPT予備領域等で目標サイズちょうどには
   届かないため、目標サイズ厳密一致では判定しない。
 
-### configure_guest_network（複数セグメント）
-- **前提**: セグメントと仮想スイッチは**1:1**（**VLANは使用しない**）。各セグメントの仮想NICは
+### configure_guest_network（固定3LAN：サーバ/管理/バックアップ）
+- **前提**: LANと仮想スイッチは**1:1**（**VLANは使用しない**）。各LANの仮想NICは
   **テンプレート作成時に追加・スイッチ接続済み**であること。本ロールは vNICの作成・スイッチ接続は
   **行わない**（既存vNICにIPを設定するのみ）。
-- 各セグメントの**`segments[].switch_name` に一致する接続先スイッチの既存vNICをホスト側で特定**
-  （`Get-VMNetworkAdapter` の `SwitchName`）してMACを取得し、ゲスト内でMAC一致のNICにIPを設定する。
-  `segments[]` をリストで定義する。
-- **NICの識別はMACで行う**（接続先スイッチはゲストOSから見えないため。ホスト側でswitch_name→vNIC→MACを解決してゲストに渡す）。
+- **IPは Exastro 代入値**（`segments[0]` の固定キー：`sv_lan_ip`/`sv_lan_prefix`/`mgmt_lan_ip`/
+  `mgmt_lan_prefix`/`bk_lan_ip`/`bk_lan_prefix`）で定義する。可変長配列ではなく固定3LANの単一要素。
+- **LAN種別→接続先スイッチ名は defaults の `switch_map`**（`sv_lan`/`mgmt_lan`/`bk_lan`）で解決する
+  （環境固定・代入値ではない）。そのスイッチに接続された既存vNIC（`Get-VMNetworkAdapter` の `SwitchName`）
+  をホスト側で特定してMACを取得し、ゲスト内でMAC一致のNICにIPを設定する。
+- **NICの識別はMACで行う**（接続先スイッチはゲストOSから見えないため。ホスト側でswitch_map→vNIC→MACを解決してゲストに渡す）。
 - **1スイッチ1vNIC前提**。同一スイッチに複数vNICが接続されている場合は構成不正として fail する
   （黙って誤ったNICに設定しない）。
-- **デフォルトゲートウェイは1セグメントのみ**に設定する（複数GWは経路が不定になり通信が不安定化する）。
-- ホストから各VMへ各セグメントで疎通確認するには、ホスト側にも各スイッチの管理OS vNICが必要
+- **デフォルトゲートウェイ・DNS・ホスト名は設定しない**（IP/プレフィックスのみ）。
+- ホストから各VMへ各LANで疎通確認するには、ホスト側にも各スイッチの管理OS vNICが必要
   （Internalスイッチなら既定で作成される。Privateスイッチはホストから疎通不可）。VM内・VM同士の通信だけなら不要。
 - ゲスト内設定のみのため `start_vm` の後（VM稼働中）に実行する。
 

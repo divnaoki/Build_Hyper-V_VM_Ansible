@@ -1,10 +1,10 @@
 ---
-# configure_guest_network ロール 既定値（複数セグメント対応）
-# 前提: 各セグメントの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）であること。
-#       セグメントと仮想スイッチは1:1（VLANは使用しない）。1スイッチに接続するvNICはVMごとに1つ。
+# configure_guest_network ロール 既定値（固定3セグメント：サーバLAN / 管理LAN / バックアップLAN）
+# 前提: 各LANの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）であること。
+#       LANと仮想スイッチは1:1（VLANは使用しない）。1スイッチに接続するvNICはVMごとに1つ。
 # 本ロールは vNIC の作成・スイッチ接続は行わず、以下を行う:
-#   1) 各セグメントの switch_name に一致する接続先スイッチの既存vNICをホスト側で特定し MAC を取得
-#   2) ゲスト内で各NIC（MACで特定）に各セグメントのIPを設定
+#   1) 各LANの switch_map に定義した接続先スイッチの既存vNICをホスト側で特定し MAC を取得
+#   2) ゲスト内で各NIC（MACで特定）に各LANのIPを設定
 # 接続はすべて PowerShell Direct（Invoke-Command -VMName）。
 #
 # 参照する VAR_vm メンバー:
@@ -12,8 +12,18 @@
 #     os_type: windows
 #     guest_admin_user: "Administrator"     PowerShell Direct用
 #     guest_admin_password: "********"        同上・機密(no_log)
-#     segments:                               セグメント定義（複数）
-#       - switch_name: "sw-mgmt"   接続先の仮想スイッチ名（これでvNICを特定する）
-#         ip: "192.168.10.2"
-#         prefix: 24
+#     segments:                               Exastro代入値（配列。先頭要素[0]を使用・固定キー）
+#       - sv_lan_ip:   "192.168.20.2"    サーバLAN IP
+#         sv_lan_prefix: 24               サーバLAN プレフィックス長
+#         mgmt_lan_ip:   "192.168.10.2"   管理LAN IP
+#         mgmt_lan_prefix: 24             管理LAN プレフィックス長
+#         bk_lan_ip:     "192.168.30.2"   バックアップLAN IP
+#         bk_lan_prefix: 24               バックアップLAN プレフィックス長
 VAR_vm: []
+
+# LAN種別 → 接続先の仮想スイッチ名（環境固定・代入値ではない）
+# ★ 実環境の仮想スイッチ名に合わせて上書きすること。各スイッチへのvNIC接続はテンプレートで実施済みであること。
+switch_map:
+  sv_lan: "sw-biz"
+  mgmt_lan: "sw-mgmt"
+  bk_lan: "sw-bk"
