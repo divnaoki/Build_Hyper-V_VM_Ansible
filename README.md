@@ -40,7 +40,7 @@ hyperv-vm-build/
 
 | ロール | 説明 | 主な使用モジュール |
 |--------|------|--------------------|
-| **import_template_vm** | sysprep済みテンプレートのエクスポート(`Virtual Machines`フォルダ)から `Import-VM -Copy -GenerateNewId` でVMを複製作成しリネーム。VMごとに専用フォルダ(`C:\VMs\<VM名>`)へVHD/構成を配置し、複数VM展開時のVHDX名衝突を回避。同名VMが存在する場合はスキップ（冪等）。 | `ansible.windows.win_find` / `win_shell` |
+| **import_template_vm** | sysprep済みテンプレートのエクスポート(`Virtual Machines`フォルダ)から `Import-VM -Copy -GenerateNewId` でVMを複製作成しリネーム。VMごとに専用フォルダ(`C:\VMs\<VM名>`)へVHD/構成を配置。テンプレートはC(OS/固定)・D(データ/可変)の2ディスクをマウント済み前提で、インポート後にVHDXファイル名をVM名基準へリネーム（C=`<VM名>.vhdx` / D=`<VM名>_data.vhdx`。Gen2はOSディスクを先頭ブートに再設定）。新規ディスク作成やサイズ変更は行わない。同名VMが存在する場合はスキップ（冪等）。 | `ansible.windows.win_find` / `win_shell` |
 | **set_vm_cpu** | vCPU数を設定する。 | `microsoft.hyperv.hv_processor` |
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |

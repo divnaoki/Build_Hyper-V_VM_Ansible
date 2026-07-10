@@ -2,10 +2,16 @@
 # 種別: VMプロビジョニング（テンプレートインポート）
 # 対象: Hyper-Vホスト（WinRM接続）。1ホストに複数VMを VAR_vm で loop 構築。
 # 冪等性: Get-VM で同名VMの存在を確認し、無い場合のみ Import-VM（-Copy -GenerateNewId）→ Rename-VM。
+#        VHDXリネームは「現ファイル名が目標名でなければ」実行し、再実行時はskipで冪等。
 # モジュール: microsoft.hyperv に Import-VM 相当のモジュールが無いため win_shell で実装し、
 #            when ガード＋changed_when で冪等化する（hv_vm は新規作成用でテンプレートImport非対応）。
 # 入力: item.template_path はエクスポートVMの 'Virtual Machines' フォルダ（.vmcx の1つ上）。
 #       win_find で *.vmcx を検索し、そのフルパスを Import-VM に渡す。
+# ディスク構成: テンプレートは C（OS/固定）・D（データ/可変）の2ディスクをマウントした状態でエクスポート済み。
+#       本ロールは新規VHDXの作成・サイズ/形式変更は行わず、インポートされた2ディスクのVHDXファイル名を
+#       VM名基準にリネームするのみ（C=<VM名>.vhdx / D=<VM名>_data.vhdx）。
+#       C/Dの識別: VMにアタッチされたディスクをコントローラ位置(ControllerNumber,ControllerLocation)昇順で並べ、
+#       先頭=OS(ブート/C)、2番目=データ(D)とみなす。
 # 前後取得: before=既存VM有無 / after=作成後VM存在。
 # 変数: VAR_vm（複数具体値変数）。メンバーは item.<member>。内部変数は VAR_ なし。
 
@@ -58,6 +64,60 @@
   register: import_result
   changed_when: "'CHANGED' in (stdout | default(''))"
 
+# --- 2.5 VHDXファイル名をVM名基準にリネームする（C=<VM名>.vhdx / D=<VM名>_data.vhdx） ---
+# テンプレート由来のVHDXファイル名を、C（OS）=<VM名>.vhdx / D（データ）=<VM名>_data.vhdx に変更する。
+# アタッチ中はVHDXファイル名を変更できないため、VM停止中に「デタッチ→Rename-Item→同一コントローラ位置へ再アタッチ」
+# を行い、Generation2 はブート順が変わるためOSディスクを先頭ブートに再設定する。既に目標名ならskip（冪等）。
+- name: VHDXファイル名をVM名基準にリネームする（C/D）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $vm = '{{ item.name }}'
+
+    # VMにアタッチされたディスクをコントローラ位置の昇順で取得。先頭=OS(ブート/C)、2番目=データ(D)。
+    $disks = @(Get-VMHardDiskDrive -VMName $vm | Sort-Object ControllerNumber, ControllerLocation)
+    if ($disks.Count -lt 2) {
+      throw "OS/データの2ディスクが見つかりません（テンプレートにC・D両方のVHDXが必要）: $vm（検出 $($disks.Count) 台）"
+    }
+
+    # 目標ファイル名: C=<VM名>.vhdx / D=<VM名>_data.vhdx。役割はコントローラ位置順で決める。
+    $plan = @(
+      [pscustomobject]@{ disk = $disks[0]; newName = "$vm.vhdx";          role = 'os'   },
+      [pscustomobject]@{ disk = $disks[1]; newName = ($vm + '_data.vhdx'); role = 'data' }
+    )
+
+    $gen = (Get-VM -Name $vm).Generation
+    $changed = $false
+    $log = @()
+    foreach ($p in $plan) {
+      $d = $p.disk
+      $oldPath = $d.Path
+      $dir = Split-Path $oldPath -Parent
+      $newPath = Join-Path $dir $p.newName
+      # 既に目標名なら何もしない（冪等）
+      if ($oldPath -ieq $newPath) { $log += "skip($($p.role)): $oldPath"; continue }
+      # アタッチ中はファイル名を変えられないため、位置を控えてデタッチ→リネーム→同一位置へ再アタッチ。
+      $ct = $d.ControllerType; $cn = $d.ControllerNumber; $cl = $d.ControllerLocation
+      Remove-VMHardDiskDrive -VMName $vm -ControllerType $ct -ControllerNumber $cn -ControllerLocation $cl
+      Rename-Item -LiteralPath $oldPath -NewName $p.newName
+      Add-VMHardDiskDrive -VMName $vm -ControllerType $ct -ControllerNumber $cn -ControllerLocation $cl -Path $newPath
+      $changed = $true
+      $log += "renamed($($p.role)): $oldPath -> $newPath"
+    }
+
+    # Generation2 はデタッチ/アタッチでブート順が末尾に回るため、OSディスクを先頭ブートデバイスに再設定する。
+    if ($changed -and $gen -eq 2) {
+      $osDrive = Get-VMHardDiskDrive -VMName $vm | Sort-Object ControllerNumber, ControllerLocation | Select-Object -First 1
+      Set-VMFirmware -VMName $vm -FirstBootDevice $osDrive
+      $log += "bootorder: OSディスクを先頭ブートに再設定"
+    }
+
+    if ($changed) { "CHANGED | " + ($log -join ' | ') } else { "OK | " + ($log -join ' | ') }
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: disk_rename
+  changed_when: "'CHANGED' in (stdout | default(''))"
+
 # --- 3. 事後確認(after)：作成後のVM存在 ---
 - name: 作成後のVM存在を取得する（after）
   ansible.windows.win_shell: |
@@ -88,6 +148,7 @@
       - "vm     : {{ item.name }}"
       - "before : {{ vm_before.results[idx].stdout | trim }}"
       - "after  : {{ vm_after.results[idx].stdout | trim }}"
+      - "disks  : {{ disk_rename.results[idx].stdout | default('') | trim }}"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"

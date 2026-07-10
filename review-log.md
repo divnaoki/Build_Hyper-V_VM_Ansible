@@ -238,3 +238,84 @@ status: **review**（再レビュー待ち）
 - モジュール構成変更なし（win_shell/assert/debug）→ モジュールマニュアル対応不要。
 - 検証: 未実施（syntax-check・実機検証は環境起動時に要実施。特に代入値prefixの型・segments[0]前提を確認）。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-10 configure_guest_network: サブネットマスク設定を追加（prefix→netmask置換・オーナー指示）
+- 指示: サブネットマスク設定が入っていないため追加。
+- 方針（オーナー確認済み）: プレフィックス長 `*_lan_prefix` を廃止し、サブネットマスク `*_lan_netmask`（255.255.255.0形式）
+  を代入値にする（置き換え）。ロール内で netmask→プレフィックス長へ変換して New-NetIPAddress に渡す。
+- 新・固定キー: `sv_lan_ip / sv_lan_netmask / mgmt_lan_ip / mgmt_lan_netmask / bk_lan_ip / bk_lan_netmask`。
+- 変更ファイル:
+  - `tasks/configure_guest_network.yml`: PowerShell関数 `Get-PrefixFromMask` を追加（マスク→プレフィックス長変換。
+    連続ビット検証・オクテット範囲検証つき。非連続/範囲外は throw）。payload・エビデンスに mask/prefix を保持。
+  - `defaults/main.yml` / `group_vars/main.yml`: 変数を netmask 形式に更新（"255.255.255.0"）。
+  - `parameter-sheet-design.md` / `README.md`（ロール表・変数早見・詳細節）: 固定キーを netmask 表記に更新。
+- 補足: マスクは連続ビットのみ許容（例 255.0.255.0 はエラー）。switch_map はプレースホルダのまま（実環境値へ要差し替え）。
+- モジュール構成変更なし（win_shell/assert/debug）→ モジュールマニュアル対応不要。
+- 検証: 未実施（syntax-check・実機検証は環境起動時に要実施。代入値maskが文字列で渡ること・変換結果を確認）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-10 configure_guest_network: netmask版を1つ前（prefix版）へロールバック（オーナー指示）
+- 指示: 1つ前（プレフィックス長 `*_lan_prefix` 方式）に戻す。実機 ipconfig でサブネットマスクが 0.0.0.0 となる事象の切り分けのため。
+- 対応: 直前の「サブネットマスク追加（netmask置換）」を全ファイルで巻き戻し。
+  - tasks（Get-PrefixFromMask削除・prefix直指定に復帰）/ defaults / group_vars / parameter-sheet-design.md / README.md。
+- 事象「ipconfig でサブネットマスク 0.0.0.0」の原因分析（要実機ログ確認）:
+  - マスク 0.0.0.0 は New-NetIPAddress に **-PrefixLength 0** が渡って設定された確定症状（IPは付くがマスクだけ0）。
+  - prefix版は `prefix=[int]$seg.sv_lan_prefix`。代入値/変数に prefix が無い（$null）と **[int]$null=0** となり、
+    例外にならず静かに 0 → PrefixLength 0 → マスク 0.0.0.0。空文字は逆に例外。
+  - 実機で $null になる典型: Exastro パラメータシート/代入値自動登録に prefix 項目が未登録、または
+    メンバー変数名が segments[0].sv_lan_prefix 等と不一致で、segments にキーが載っていない。
+  - 確認策: タスク4のエビデンス（segments 出力）と、代入値自動登録設定のキー名・値を突き合わせる。
+    group_vars（prefix:24）でのローカル検証では 24 になるはずで、そこで再現するかも切り分けに有効。
+- 注意: 戻すだけでは代入値未登録が真因の場合は解消しない（prefix版でも同条件で 0.0.0.0 になる）。
+- status: ロールバック反映済み。原因は代入値側の要確認事項として PM/オーナーへ共有。
+
+---
+
+## 2026-07-10 prefix=0 の真因確定＋解決、および Ping 片方向不通の切り分け（オーナー実機）
+### prefix=0（マスク0.0.0.0）の真因 — 確定
+- 実機 exec.log の `echo $seg`（Format-Table）で、$seg のプロパティが sv_lan_ip / mgmt_lan_ip / bk_lan_ip の**3つのみ**、
+  prefix系が**1つも存在しない**ことを確認。ip系は値あり（10.103.0.46 等）。
+- `$seg.sv_lan_prefix` が無い → `[int]$null=0` → `New-NetIPAddress -PrefixLength 0` → サブネットマスク 0.0.0.0。
+- 原因: defaults/代入値のYAMLで `sv_lan_prefix` 等が `sv_lan_ip:`（値空）の配下に**ネスト**していた
+  （インデントが1段深く、sv_lan_ip の値扱い）。結果 segments[0] 直下に prefix キーが載らなかった。
+- **解決（オーナー実施）**: 各 prefix を segments 配列内メンバーではなく**別変数として定義**したところ正常化。
+  ※ ドラフト（.company側）の tasks/defaults/group_vars は segments 内フラット定義のまま。実環境の別変数方式に合わせるかは要判断。
+
+### 新課題: Ping 片方向不通
+- 事象: 構築VM（WindowsServer）→ 他VM / Hyper-Vホスト は疎通OK。逆（他VM/ホスト → 構築VM）が**不通**。
+- 原因（診断）: 構築VMの **Windowsファイアウォールがインバウンドの ICMPv4 Echo Request を拒否**（既定 inbound block）。
+  行き（VM発）は戻りが確立済み扱いで通るが、帰り（VM宛の Echo Request）に VM が応答しないため片方向不通。
+  設計書「6. Firewallプロファイル」既定 inbound_action=block とも整合。
+- 対処案: os_config パッケージの **Firewallルール（VAR_fw_rules / windows_firewall ロール）** に
+  ICMPv4 Echo Request のインバウンド許可レコードを追加（direction=in / action=allow / protocol=icmpv4）。
+  ※ Echo Request限定にするなら icmp_type_code=8 相当の指定可否を windows_firewall ロールで要確認。
+- 切り分け: 構築VMで一時的に FW 無効（`Set-NetFirewallProfile -All -Enabled $false`）or `Enable-NetFirewallRule -Name FPS-ICMP4-ERQ-In`
+  で Ping が通れば FW 起因で確定。
+- status: prefix=0 は解決。Ping はFW設定（VAR_fw_rules）での対応を提案中。
+
+---
+
+## 2026-07-10 import_template_vm: Dドライブ対応＋VHDXファイル名のVM名リネーム追加（オーナー指示）
+- 指示: 現在Cドライブのみ構成→Dドライブ追加（C=固定/D=可変）。VHDX名をVM名、Dディスク名をVM名_dataにリネームする処理追加。
+- 前提（オーナー補足）: テンプレートは C・D 両ディスクをマウント済みでエクスポート → **新規ディスク作成は不要**。
+  「C=固定/D=可変」はテンプレート側のディスク形式であり、Playbookはサイズ・形式に触れない（リネームのみ）。
+- 変更（tasks/import_template_vm.yml）:
+  - タスク2.5「VHDXファイル名をVM名基準にリネームする（C/D）」を追加（インポート直後・after確認前）。
+    - ディスクはコントローラ位置昇順で 先頭=OS(C)/2番目=データ(D) と識別。2台未満なら fail。
+    - C=<VM名>.vhdx / D=<VM名>_data.vhdx。アタッチ中はリネーム不可のため
+      「デタッチ→Rename-Item→同一コントローラ位置へ再アタッチ」。既に目標名ならskip（冪等）。
+    - Generation2 はデタッチ/アタッチでブート順が末尾に回るため、OSディスクを FirstBootDevice に再設定。
+    - VM停止中前提（本ロールは start_vm 前）。
+  - ヘッダにディスク構成・リネーム規則を追記。エビデンス(debug)に disks 行を追加。
+  - defaults/main.yml・README.md にディスク前提とリネーム規則を追記。
+- モジュール: 追加処理は win_shell 内のPowerShell（Get/Add/Remove-VMHardDiskDrive・Rename-Item・Set-VMFirmware）。
+  Ansibleモジュールは ansible.windows.win_shell のみ（既存）→ モジュールマニュアル対応不要。
+- ★要確認（PM/オーナー）: set_vm_disk は現状 OSディスク(C) を os_disk_size_gb へ拡張する設計。
+  「Cは固定」方針と矛盾するため、set_vm_disk の扱い（停止 or Dデータディスク拡張へ転用）を別途決める必要あり。
+  また set_vm_disk は「データディスク未追加・接続先頭=OS」前提だが、D追加後も先頭=C拡張のため動作自体は継続する。
+- 検証: YAML構文OK（python yaml）。syntax-check・実機は環境起動時に要実施（特にデタッチ/再アタッチ後のブート）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
