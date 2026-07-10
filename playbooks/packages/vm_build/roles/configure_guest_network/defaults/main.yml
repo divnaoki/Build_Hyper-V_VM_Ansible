@@ -2,14 +2,13 @@
 # configure_guest_network ロール 既定値（複数セグメント対応）
 # 前提: 各セグメントの仮想NICはテンプレート作成時に追加・仮想スイッチ接続済み（マウント済み）であること。
 #       セグメントと仮想スイッチは1:1（VLANは使用しない）。1スイッチに接続するvNICはVMごとに1つ。
-# 本ロールは vNIC の作成・スイッチ接続は行わず、以下を行う（Windowsのみ）:
+# 本ロールは vNIC の作成・スイッチ接続は行わず、以下を行う:
 #   1) 各セグメントの switch_name に一致する接続先スイッチの既存vNICをホスト側で特定し MAC を取得
 #   2) ゲスト内で各NIC（MACで特定）に各セグメントのIPを設定
-#   3) ホスト名を VM名（item.name）に設定（変更時は再起動）
 # 接続はすべて PowerShell Direct（Invoke-Command -VMName）。
 #
 # 参照する VAR_vm メンバー:
-#   - name                       ホスト名としても使用（NetBIOS: 15文字以内・英数推奨）
+#   - name                       VM名
 #     os_type: windows
 #     guest_admin_user: "Administrator"     PowerShell Direct用
 #     guest_admin_password: "********"        同上・機密(no_log)
@@ -17,6 +16,4 @@
 #       - switch_name: "sw-mgmt"   接続先の仮想スイッチ名（これでvNICを特定する）
 #         ip: "192.168.10.2"
 #         prefix: 24
-#         gateway: ""         既定GW（不要なら空文字。複数セグメントでは設定は1つに限定推奨）
-#         dns: []             DNS（リスト。空なら未設定）
 VAR_vm: []

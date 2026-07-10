@@ -181,3 +181,38 @@ status: **review**（再レビュー待ち）
     segments[] 対応の再設計が必要である旨を注記（別途改訂）。
 - 検証: `ansible-playbook test_configure_guest_network.yml --syntax-check` OK。実機検証は未実施（環境起動時に要実施）。
 - status: 実装反映済み。**PM再レビュー対象に含めること**（set_vm_disk 再レビューと併せて）。
+
+---
+
+## 2026-07-10 configure_guest_network 仕様変更: gateway/ホスト名/OS分岐の削除（オーナー指示）
+- 指示: `roles/configure_guest_network/tasks/configure_guest_network.yml` を以下修正。
+  1. DefaultGateway追加を削除
+  2. ホスト名設定を削除
+  3. `OSがWindowsだったら`条件分岐を削除
+- 変更内容:
+  - **gateway削除**: payload収集の `gateway` フィールド、`New-NetIPAddress -DefaultGateway` 分岐、
+    デフォルトルート削除処理（`Remove-NetRoute -DestinationPrefix '0.0.0.0/0'`）を除去。IPは常にgatewayなしで設定。
+  - **ホスト名削除**: ゲスト内 `Rename-Computer`／`name_changed`／返却JSONの `name_changed` を除去。
+    再起動タスク（旧タスク5「ホスト名変更を反映するため再起動する」）を丸ごと削除。
+    エビデンス(debug)の `hostname` 行を削除。
+  - **OS分岐削除**: 全タスクの `when: item.os_type == 'windows'` を除去。ヘッダ/コメントの Windows限定記述も更新。
+  - タスク名を「複数セグメントのIP・ホスト名を設定する」→「複数セグメントのIPを設定する」等に整合。
+- モジュール構成: win_shell/assert/debug のみで新規モジュールなし（削除のみ）→ モジュールマニュアル対応不要。
+- 検証: 未実施（syntax-check・実機検証は環境起動時に要実施）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-10 configure_guest_network 追加修正: DNS削除＋win_shellコメント拡充（オーナー指示）
+- 指示: (1) DNS設定も不要なので削除、(2) win_shellで長くなる箇所の処理説明コメントを増やす。
+- 変更内容:
+  - `tasks/configure_guest_network.yml`:
+    - **DNS削除**: payload収集の `dns` フィールド、ゲスト内 `Set-DnsClientServerAddress` を除去。ヘッダの変数記載も更新。
+    - **コメント拡充**: タスク1（疎通待機）とタスク2（IP設定）のwin_shell内へ、資格情報生成／PowerShell Direct疎通判定／
+      MAC突き合わせの理由／JSON受け渡し／冪等性判定／エビデンス配列の各処理説明コメントを追記。
+  - `group_vars/main.yml`: 検証値の各segmentから未使用の `dns` を削除。あわせて前回未反映だった `gateway`（未使用）も削除。
+  - `defaults/main.yml`: コメント例から `gateway`/`dns`/ホスト名設定/「Windowsのみ」記述を削除し実装に整合。
+- 補足: `os_type` は他ロールでの参照可能性があるため VAR_vm に残置。
+- モジュール構成変更なし（win_shell/assert/debug）→ モジュールマニュアル対応不要。
+- 検証: 未実施（syntax-check・実機検証は環境起動時に要実施）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
