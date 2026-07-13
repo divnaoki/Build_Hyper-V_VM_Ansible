@@ -69,7 +69,8 @@
 # --- 2.5 VHDXファイル名をVM名基準にリネームする（C=<VM名>.vhdx / D=<VM名>_data.vhdx） ---
 # テンプレート由来のVHDXファイル名を、C（OS）=<VM名>.vhdx / D（データ）=<VM名>_data.vhdx に変更する。
 # アタッチ中はVHDXファイル名を変更できないため、VM停止中に「デタッチ→Rename-Item→同一コントローラ位置へ再アタッチ」
-# を行い、Generation2 はブート順が変わるためOSディスクを先頭ブートに再設定する。既に目標名ならskip（冪等）。
+# を行う。既に目標名ならskip（冪等）。ブート順の再設定は不要（Gen2は bootmgfw.efi のファイルブートエントリが
+# 再アタッチ後も維持される・実機確認 2026-07-13）。
 # VM情報を取得し、起動状態（State が Off 以外）の場合はリネーム処理全体をスキップする（skip扱い・エラーにしない）。
 - name: VHDXファイル名をVM名基準にリネームする（C/D・VM起動中はスキップ）
   ansible.windows.win_shell: |
@@ -96,7 +97,6 @@
       [pscustomobject]@{ disk = $disks[1]; newName = ($vm + '_data.vhdx'); role = 'data' }
     )
 
-    $gen = $vmInfo.Generation
     $changed = $false
     $log = @()
     foreach ($p in $plan) {
@@ -115,12 +115,9 @@
       $log += "renamed($($p.role)): $oldPath -> $newPath"
     }
 
-    # Generation2 はデタッチ/アタッチでブート順が末尾に回るため、OSディスクを先頭ブートデバイスに再設定する。
-    if ($changed -and $gen -eq 2) {
-      $osDrive = Get-VMHardDiskDrive -VMName $vm | Sort-Object ControllerNumber, ControllerLocation | Select-Object -First 1
-      Set-VMFirmware -VMName $vm -FirstBootDevice $osDrive
-      $log += "bootorder: OSディスクを先頭ブートに再設定"
-    }
+    # ブート順の再設定は不要（実機確認 2026-07-13）: インポート後のGen2ファームウェアは
+    # OSディスク上の bootmgfw.efi を指すファイルブートエントリで起動する設定になっており、
+    # デタッチ→再アタッチ後もそのエントリが維持されるため、Set-VMFirmware による再設定は行わない。
 
     if ($changed) { "CHANGED | " + ($log -join ' | ') } else { "OK | " + ($log -join ' | ') }
   loop: "{{ VAR_vm }}"

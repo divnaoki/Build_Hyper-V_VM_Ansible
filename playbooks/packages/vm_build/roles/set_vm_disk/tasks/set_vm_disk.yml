@@ -102,7 +102,9 @@
   no_log: true
 
 # --- 7. [MUST-2/3] 変更(ゲスト)：ディスク再スキャン → パーティションを最大まで拡張（Windowsのみ・冪等） ---
-# Update-Disk でオンライン拡張をゲストに認識させた上で、before/after/SizeMax/blocked をJSONで返す。
+# データディスクがオフラインの場合（SCSIデータディスクはSANポリシーの既定でオフラインになりうる）、
+# ドライブレターが見えず Get-Partition/Update-Disk が失敗するため、先にオンライン化＋読み取り専用解除を行う。
+# その後 Update-Disk でオンライン拡張をゲストに認識させた上で、before/after/SizeMax/blocked をJSONで返す。
 # blocked = 拡張後サイズが目標未満（末尾に未割当が無い／回復パーティションが末尾にある等）の検知フラグ。
 # hypervコレクションに該当モジュールが無いため win_shell（PowerShell Direct）を使用。
 - name: ゲスト内のデータパーティションを最大まで拡張する（Windowsのみ）
@@ -113,11 +115,21 @@
     Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ item.data_disk_drive_letter }}', {{ item.data_disk_size_gb }} -ScriptBlock {
       param($dl, $targetGb)
       $ErrorActionPreference = 'Stop'
+      # データディスクがオフラインだと対象ドライブレターが見えないため、先にオフラインディスクをオンライン化する。
+      # オンライン化済みなら何もしない（冪等）。読み取り専用フラグが残る場合は解除する（Resize-Partition に必要）。
+      $onlined = $false
+      if (-not (Get-Partition -DriveLetter $dl -ErrorAction SilentlyContinue)) {
+        foreach ($disk in @(Get-Disk | Where-Object { $_.IsOffline })) {
+          Set-Disk -Number $disk.Number -IsOffline $false
+          if ((Get-Disk -Number $disk.Number).IsReadOnly) { Set-Disk -Number $disk.Number -IsReadOnly $false }
+          $onlined = $true
+        }
+      }
       $part = Get-Partition -DriveLetter $dl
       Update-Disk -Number $part.DiskNumber
       $before = (Get-Partition -DriveLetter $dl).Size
       $max    = (Get-PartitionSupportedSize -DriveLetter $dl).SizeMax
-      $changed = $false
+      $changed = $onlined  # オンライン化も変更として扱う
       $err = ''
       if ($before -lt $max) {
         try { Resize-Partition -DriveLetter $dl -Size $max; $changed = $true }
@@ -132,6 +144,7 @@
         max_gb    = [math]::Round($max / 1GB, 1)
         target_gb = $targetGb
         changed   = $changed
+        onlined   = $onlined
         blocked   = $blocked
         error     = $err
       } | ConvertTo-Json -Compress
