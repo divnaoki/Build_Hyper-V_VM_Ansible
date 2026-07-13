@@ -319,3 +319,41 @@ status: **review**（再レビュー待ち）
   また set_vm_disk は「データディスク未追加・接続先頭=OS」前提だが、D追加後も先頭=C拡張のため動作自体は継続する。
 - 検証: YAML構文OK（python yaml）。syntax-check・実機は環境起動時に要実施（特にデタッチ/再アタッチ後のブート）。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-10 set_vm_disk: Cドライブ拡張→Dドライブ（データディスク）拡張へ変更（オーナー指示）
+- 指示: Cドライブは固定、Dドライブを可変で拡張する処理に変更。拡張後にゲストOS上でパーティション拡張も実施（C時と同様）。
+- 変更（tasks/set_vm_disk.yml のみ・構造/順序/スタイルは不変。C→Dの置換に限定）:
+  - ディスク特定: 接続中ディスクの先頭（OS/C）→ **2番目（データ/D）**。`Select-Object -First 1` → `-Skip 1 -First 1`
+    （import_template_vm が D を2番目に配置する前提と整合）。
+  - 変数: `item.os_disk_size_gb` → `item.data_disk_size_gb`、`item.os_disk_drive_letter` → `item.data_disk_drive_letter`。
+  - register `os_disk` → `data_disk`。名称/コメントを OSディスク → データディスク に。
+  - ゲスト内パーティション拡張（タスク6-8）は既存処理をそのまま D ドライブ対象で流用（ドライブレター駆動のため
+    data_disk_drive_letter を渡すだけ）。冪等性・no_log・assert・エビデンス等のロジックは変更なし。
+- ★未反映（指示範囲を set_vm_disk.yml に限定したため別途必要）:
+  - 新変数 `data_disk_size_gb` / `data_disk_drive_letter` を set_vm_disk の defaults/main.yml・group_vars/main.yml に反映。
+  - parameter-sheet-design.md #9「OSディスクサイズ」#10「OSドライブレター」を データディスク用（D）へ改訂。
+  - ※ 上記は「勝手に触らない」方針で今回は未変更。反映要否はオーナー/PM判断。
+- 補足: Cドライブ固定化に伴い、OSディスク拡張は本ロールから消滅（Cは import 時のVHDXそのまま）。
+- モジュール: hv_vhd（既存）＋ win_shell（PowerShell Direct）。新規モジュールなし → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。syntax-check・実機は環境起動時に要実施（特に D=2番目ディスクの前提とゲスト内 D: パーティション拡張）。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-13 import_template_vm: VM起動中はVHDXリネームをスキップ（オーナー指示）
+- 指示: VM情報を取得し、起動状態の場合はVHDXリネーム処理をスキップする。
+- 変更（tasks/import_template_vm.yml のタスク2.5のみ・他タスクは不変）:
+  - リネーム用 win_shell の冒頭で `Get-VM` によりVM情報を取得し、`State -ne 'Off'` なら
+    「OK | skip: VMが起動状態のため…（State=xxx）」を出力して `exit 0`（skip扱い・エラーにしない）。
+  - Running のほか Paused / Saved 等の Off 以外も同様にアタッチ中VHDXの名前変更が不可のため、
+    スキップ対象は「Off 以外」で判定（起動状態の要求を包含する安全側の判定）。
+  - Generation の取得を後段の `(Get-VM).Generation` 再呼び出しから、冒頭で取得した `$vmInfo.Generation` に統一。
+  - changed_when は従来どおり 'CHANGED' 判定のため、skip時は changed=false（冪等表示も維持）。
+  - ファイル先頭・タスク2.5のコメント（冪等性の説明）に本挙動を追記。
+- 理由: 稼働中VMに対して再実行すると Remove-VMHardDiskDrive で必ず失敗するため、
+  稼働中は「リネーム未実施のままskip」で安全に流し切れるようにする。
+- モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。実機（Hyper-Vホスト）での起動中VM skip / 停止中VM rename の両パス確認は環境起動時に要実施。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。

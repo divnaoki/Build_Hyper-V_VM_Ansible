@@ -1,5 +1,5 @@
 ---
-# 種別: ストレージ構成（OSディスク拡張）
+# 種別: ストレージ構成（データディスク拡張）
 # 対象: Hyper-Vホスト（WinRM）。ホスト側でVHDXを拡張し、ゲスト内パーティションを最大まで拡張する。
 # 配置: start_vm の後（ゲスト内拡張にVM起動が必須なため。HW設定はVM停止中という他ロールの原則の例外）。
 #
@@ -9,11 +9,11 @@
 #     hypervコレクションに該当モジュールが無いため ansible.windows.win_shell を使用。
 #
 # 前提（SHOULD-4: 明示）:
-#   - OS(ブート)ディスクは Generation2 / SCSI 接続前提。VM起動中の hv_vhd 拡張（オンライン拡張）を用いる。
+#   - データディスクは Generation2 / SCSI 接続前提。VM起動中の hv_vhd 拡張（オンライン拡張）を用いる。
 #     → Gen1/IDE の場合はオンライン拡張不可。start_vm 前にVHDX拡張を分離する設計へ変更が必要（残課題）。
-#   - 本ロールは「データディスク未追加」を前提とし、OSディスク = 接続中ディスクの先頭
-#     （ControllerNumber, ControllerLocation 昇順の先頭）とみなす。データディスク追加ロールを
-#     本ロールより前に置く場合は OSディスク特定方法の見直しが必要。
+#   - Cドライブ（OSディスク）は固定とし拡張しない。本ロールは データディスク = 接続中ディスクの2番目
+#     （ControllerNumber, ControllerLocation 昇順の2番目）とみなす（import_template_vm が D を2番目に配置する前提）。
+#     ディスクの接続順が変わる場合は データディスク特定方法の見直しが必要。
 #   - ゲスト内拡張は PowerShell Direct（Invoke-Command -VMName）で実施し、ゲストNWに依存しない。
 #   - ゲスト内拡張は Windows のみ（item.os_type == 'windows'）。RHEL は VHDX 拡張のみ行い、ゲスト内はスキップ
 #     （configure_vm_network と同様、ゲスト内処理は Windows 専用とする precedent に従う。Linux拡張は残課題）。
@@ -24,21 +24,21 @@
 # 前後取得: ホスト側は Get-VHD でVHDXサイズ(GB)、ゲスト側は Get-Partition でボリュームサイズ(GB)を before/after 取得。
 # 機密(SHOULD-5): ゲスト資格情報を含むタスク（疎通待ち・拡張実行）は no_log:true。
 #   ただし検証(assert)・エビデンス(debug)は no_log を付けず、register済みの結果からVM名・前後サイズ・失敗理由を可視化する。
-# 変数: VAR_vm。item.os_disk_size_gb / os_disk_drive_letter / os_type / guest_admin_user / guest_admin_password。
+# 変数: VAR_vm。item.data_disk_size_gb / data_disk_drive_letter / os_type / guest_admin_user / guest_admin_password。
 
-# --- 1. OS(ブート)ディスク VHDX のパスを取得する（read / hv_vhd の path に渡す） ---
-- name: OSディスクVHDXのパスを取得する
+# --- 1. データディスク VHDX のパスを取得する（read / hv_vhd の path に渡す） ---
+- name: データディスクVHDXのパスを取得する
   ansible.windows.win_shell: |
-    (Get-VMHardDiskDrive -VMName '{{ item.name }}' | Sort-Object ControllerNumber, ControllerLocation | Select-Object -First 1).Path
+    (Get-VMHardDiskDrive -VMName '{{ item.name }}' | Sort-Object ControllerNumber, ControllerLocation | Select-Object -Skip 1 -First 1).Path
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
-  register: os_disk
+  register: data_disk
   changed_when: false
 
 # --- 2. 事前確認(before)：VHDX の現在サイズ(GB) ---
-- name: OSディスクVHDXの現在サイズを取得する（before）
-  ansible.windows.win_shell: "[math]::Round((Get-VHD -Path '{{ os_disk.results[idx].stdout | trim }}').Size / 1GB, 0)"
+- name: データディスクVHDXの現在サイズを取得する（before）
+  ansible.windows.win_shell: "[math]::Round((Get-VHD -Path '{{ data_disk.results[idx].stdout | trim }}').Size / 1GB, 0)"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
@@ -47,10 +47,10 @@
   changed_when: false
 
 # --- 3. 変更(ホスト)：VHDXを目標サイズへ拡張（hv_vhd・冪等・拡張のみ） ---
-- name: OSディスクVHDXを目標サイズへ拡張する（hv_vhd）
+- name: データディスクVHDXを目標サイズへ拡張する（hv_vhd）
   microsoft.hyperv.hv_vhd:
-    path: "{{ os_disk.results[idx].stdout | trim }}"
-    size_bytes: "{{ item.os_disk_size_gb }}GB"
+    path: "{{ data_disk.results[idx].stdout | trim }}"
+    size_bytes: "{{ item.data_disk_size_gb }}GB"
     state: present
   loop: "{{ VAR_vm }}"
   loop_control:
@@ -59,8 +59,8 @@
   register: vhd_resize
 
 # --- 4. 事後確認(after)：VHDX の拡張後サイズ(GB) ---
-- name: OSディスクVHDXの拡張後サイズを取得する（after）
-  ansible.windows.win_shell: "[math]::Round((Get-VHD -Path '{{ os_disk.results[idx].stdout | trim }}').Size / 1GB, 0)"
+- name: データディスクVHDXの拡張後サイズを取得する（after）
+  ansible.windows.win_shell: "[math]::Round((Get-VHD -Path '{{ data_disk.results[idx].stdout | trim }}').Size / 1GB, 0)"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
@@ -72,8 +72,8 @@
 - name: VHDXが目標サイズ以上であることを検証する
   ansible.builtin.assert:
     that:
-      - "(disk_after.results[idx].stdout | trim | int) >= (item.os_disk_size_gb | int)"
-    fail_msg: "VHDX拡張に失敗しました: {{ item.name }}（after={{ disk_after.results[idx].stdout | trim }}GB / target={{ item.os_disk_size_gb }}GB）"
+      - "(disk_after.results[idx].stdout | trim | int) >= (item.data_disk_size_gb | int)"
+    fail_msg: "VHDX拡張に失敗しました: {{ item.name }}（after={{ disk_after.results[idx].stdout | trim }}GB / target={{ item.data_disk_size_gb }}GB）"
     success_msg: "VHDXは目標サイズ以上です: {{ item.name }}（{{ disk_after.results[idx].stdout | trim }}GB）"
     quiet: true
   loop: "{{ VAR_vm }}"
@@ -105,12 +105,12 @@
 # Update-Disk でオンライン拡張をゲストに認識させた上で、before/after/SizeMax/blocked をJSONで返す。
 # blocked = 拡張後サイズが目標未満（末尾に未割当が無い／回復パーティションが末尾にある等）の検知フラグ。
 # hypervコレクションに該当モジュールが無いため win_shell（PowerShell Direct）を使用。
-- name: ゲスト内のOSパーティションを最大まで拡張する（Windowsのみ）
+- name: ゲスト内のデータパーティションを最大まで拡張する（Windowsのみ）
   ansible.windows.win_shell: |
     $ErrorActionPreference = 'Stop'
     $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
     $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
-    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ item.os_disk_drive_letter }}', {{ item.os_disk_size_gb }} -ScriptBlock {
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ item.data_disk_drive_letter }}', {{ item.data_disk_size_gb }} -ScriptBlock {
       param($dl, $targetGb)
       $ErrorActionPreference = 'Stop'
       $part = Get-Partition -DriveLetter $dl
@@ -151,7 +151,7 @@
       - "not ((guest_expand.results[idx].stdout | trim | from_json).blocked | bool)"
     fail_msg: >-
       ゲスト内ディスクが縮小しています（異常）: {{ item.name }}
-      (drive {{ item.os_disk_drive_letter }}:
+      (drive {{ item.data_disk_drive_letter }}:
       before={{ (guest_expand.results[idx].stdout | trim | from_json).before_gb }}GB
       after={{ (guest_expand.results[idx].stdout | trim | from_json).after_gb }}GB)
       err={{ (guest_expand.results[idx].stdout | trim | from_json).error }}
@@ -164,12 +164,12 @@
     index_var: idx
 
 # --- 9. エビデンス出力：VHDX前後差分＋ゲスト内ボリューム前後差分 ---
-- name: OSディスク拡張の前後差分をエビデンス出力する
+- name: データディスク拡張の前後差分をエビデンス出力する
   ansible.builtin.debug:
     msg:
       - "vm     : {{ item.name }}"
-      - "vhd    : {{ disk_before.results[idx].stdout | trim }}GB -> {{ disk_after.results[idx].stdout | trim }}GB (target={{ item.os_disk_size_gb }}GB, changed={{ vhd_resize.results[idx].changed }})"
-      - "guest  : {{ ('drive ' ~ item.os_disk_drive_letter ~ ': ' ~ (guest_expand.results[idx].stdout | trim | from_json).before_gb ~ 'GB -> ' ~ (guest_expand.results[idx].stdout | trim | from_json).after_gb ~ 'GB (changed=' ~ (guest_expand.results[idx].stdout | trim | from_json).changed ~ ')') if item.os_type == 'windows' else 'skipped (os_type=' ~ item.os_type ~ ')' }}"
+      - "vhd    : {{ disk_before.results[idx].stdout | trim }}GB -> {{ disk_after.results[idx].stdout | trim }}GB (target={{ item.data_disk_size_gb }}GB, changed={{ vhd_resize.results[idx].changed }})"
+      - "guest  : {{ ('drive ' ~ item.data_disk_drive_letter ~ ': ' ~ (guest_expand.results[idx].stdout | trim | from_json).before_gb ~ 'GB -> ' ~ (guest_expand.results[idx].stdout | trim | from_json).after_gb ~ 'GB (changed=' ~ (guest_expand.results[idx].stdout | trim | from_json).changed ~ ')') if item.os_type == 'windows' else 'skipped (os_type=' ~ item.os_type ~ ')' }}"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
