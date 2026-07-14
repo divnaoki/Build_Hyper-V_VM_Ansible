@@ -3,11 +3,12 @@
 # VAR_vm の基本構造は import_template_vm/defaults/main.yml を参照（バンドルON・1レコード=1VM）。
 # 本ロールで参照する VAR_vm メンバー（パラメータシートに追加が必要）:
 #   - name: vm01                        # VAR_vm.name              対象VM名（既存）
-#     os_type: windows                  # VAR_vm.os_type           windows / rhel（既存。ゲスト内拡張はwindowsのみ）
+#     os_family: WindowsServer          # VAR_vm.os_family         ゲストOS種別。'WindowsServer' のときのみゲスト内拡張を実行
 #     os_disk_size_gb: 100              # VAR_vm.os_disk_size_gb   OS(ブート)ディスクの目標サイズ(GB)。現サイズ未満のときのみ拡張
 #     os_disk_drive_letter: "C"         # VAR_vm.os_disk_drive_letter  ゲスト内で拡張するドライブレター（Windowsのみ。既定 C）
-#     guest_admin_user: "Administrator"     # VAR_vm.guest_admin_user      PowerShell Direct用（既存）
-#     guest_admin_password: "********"       # VAR_vm.guest_admin_password  PowerShell Direct用・機密(no_log)（既存）
-# 注: os_disk_size_gb / os_disk_drive_letter の2つが本ロールの新規メンバー。
-#     既存のVAR_vm構造（import_template_vm/defaults/main.yml）にもこの2メンバーを追記しておくこと。
+#     guest_admin_user: "Administrator"     # VAR_vm.guest_admin_user      WindowsServer=PowerShell Direct用 / RHEL=SSH用（rootを想定）（既存）
+#     guest_admin_password: "********"       # VAR_vm.guest_admin_password  同上・機密(no_log)（既存）
+# 注: os_disk_size_gb / os_disk_drive_letter / os_family が本ロールの新規メンバー。
+#     既存のVAR_vm構造（import_template_vm/defaults/main.yml）にも追記し、パラメータシートに os_family 列を追加すること
+#     （os_family は 'WindowsServer' / 'RHEL' 等。'WindowsServer' 以外はゲスト内拡張をスキップ）。
 VAR_vm: []

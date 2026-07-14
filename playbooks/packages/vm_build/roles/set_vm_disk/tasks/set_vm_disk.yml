@@ -15,8 +15,11 @@
 #     （ControllerNumber, ControllerLocation 昇順の2番目）とみなす（import_template_vm が D を2番目に配置する前提）。
 #     ディスクの接続順が変わる場合は データディスク特定方法の見直しが必要。
 #   - ゲスト内拡張は PowerShell Direct（Invoke-Command -VMName）で実施し、ゲストNWに依存しない。
-#   - ゲスト内拡張は Windows のみ（item.os_type == 'windows'）。RHEL は VHDX 拡張のみ行い、ゲスト内はスキップ
-#     （configure_vm_network と同様、ゲスト内処理は Windows 専用とする precedent に従う。Linux拡張は残課題）。
+#   - ゲストOS種別はパラメータシートの os_family で指定する。
+#     WindowsServer: PowerShell Direct（タスク6〜8）でゲスト内パーティション拡張。
+#     RHEL: Hyper-VホストからのSSH（plink.exe・タスク8.5）で /data パーティション拡張。
+#           ★ホストに plink.exe（PuTTY）が必要。ゲストIPは統合サービス報告値から自動取得。
+#     上記以外: VHDX 拡張のみ行い、ゲスト内はスキップ。
 #
 # 冪等性:
 #   - hv_vhd の size_bytes は拡張のみ（既に同等以上なら changed=false）。縮小は行わない。
@@ -24,7 +27,9 @@
 # 前後取得: ホスト側は Get-VHD でVHDXサイズ(GB)、ゲスト側は Get-Partition でボリュームサイズ(GB)を before/after 取得。
 # 機密(SHOULD-5): ゲスト資格情報を含むタスク（疎通待ち・拡張実行）は no_log:true。
 #   ただし検証(assert)・エビデンス(debug)は no_log を付けず、register済みの結果からVM名・前後サイズ・失敗理由を可視化する。
-# 変数: VAR_vm。item.data_disk_size_gb / data_disk_drive_letter / os_type / guest_admin_user / guest_admin_password。
+# 変数: VAR_vm。item.os_family / data_disk_size_gb / data_disk_drive_letter / guest_admin_user / guest_admin_password。
+#       （os_family: ゲストOS種別（'WindowsServer' / 'RHEL'）。パラメータシートから取得。
+#         guest_admin_*: WindowsServer は PowerShell Direct 用、RHEL は SSH 用（root を想定））
 
 # --- 1. データディスク VHDX のパスを取得する（read / hv_vhd の path に渡す） ---
 - name: データディスクVHDXのパスを取得する
@@ -90,7 +95,7 @@
     $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
     $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
     Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ScriptBlock { 'READY' }
-  when: item.os_type == 'windows'
+  when: item.os_family == 'WindowsServer'  # ゲストOSがWindowsの場合のみ（パラメータシート os_family）
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
@@ -149,10 +154,11 @@
         error     = $err
       } | ConvertTo-Json -Compress
     }
-  when: item.os_type == 'windows'
+  when: item.os_family == 'WindowsServer'  # ゲストOSがWindowsの場合のみ（パラメータシート os_family）
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
+    index_var: idx
   register: guest_expand
   changed_when: "'\"changed\":true' in (stdout | default(''))"
   # no_log: true
@@ -170,11 +176,64 @@
       err={{ (guest_expand.results[idx].stdout | trim | from_json).error }}
     success_msg: "ゲスト内ディスク拡張OK: {{ item.name }}（{{ (guest_expand.results[idx].stdout | trim | from_json).after_gb }}GB）"
     quiet: true
-  when: item.os_type == 'windows'
+  when: item.os_family == 'WindowsServer'  # ゲストOSがWindowsの場合のみ（パラメータシート os_family）
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
     index_var: idx
+
+# --- 8.5 変更(ゲスト/RHEL)：/data パーティションを最大まで拡張（os_family=RHEL のみ） ---
+# RHELゲストはPowerShell Directが使えないため、Hyper-VホストからSSHで実行する。
+# パスワードの非対話指定が必要なため plink.exe（PuTTY）の -pw を使用（OpenSSHクライアントは
+# コマンドラインでのパスワード指定不可）。★Hyper-Vホストに plink.exe の導入とPATH通しが必要。
+# ゲストIPは統合サービス（hyperv-daemons）がホストへ報告するIPv4を自動取得（パラメータシート追加不要）。
+# root資格情報は item.guest_admin_user / guest_admin_password を使用（RHEL行は root を想定）。
+# 拡張手順（ゲスト内・bash）:
+#   findmnt で /data のデバイス(sdXXN)を特定 → umount /data → parted resizepart N 100%
+#   → mount -a → xfs_growfs /data。before/after サイズ比較で CHANGED / OK を返す（冪等）。
+- name: ゲスト内の/dataパーティションを最大まで拡張する（RHELのみ）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $vm = '{{ item.name }}'
+    $user = '{{ item.guest_admin_user }}'
+    $pass = '{{ item.guest_admin_password }}'
+
+    # ゲストIPを統合サービスの報告値から取得（IPv4の先頭。hyperv-daemons 起動が前提）
+    $ip = (Get-VMNetworkAdapter -VMName $vm).IPAddresses |
+      Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -First 1
+    if (-not $ip) { throw "ゲストIPを取得できません（統合サービス/hyperv-daemonsの起動を確認）: $vm" }
+
+    # /data 拡張スクリプト（ゲスト側で bash -s 実行）。失敗時は set -e で即中断しタスクを失敗させる。
+    $script = @'
+    set -e
+    SRC=$(findmnt -n -o SOURCE /data)
+    DISK=$(echo "$SRC" | sed 's/[0-9]*$//')
+    PART=$(echo "$SRC" | grep -o '[0-9]*$')
+    BEFORE=$(lsblk -bno SIZE "$SRC")
+    umount /data
+    parted -s "$DISK" resizepart "$PART" 100%
+    mount -a
+    xfs_growfs /data > /dev/null
+    AFTER=$(lsblk -bno SIZE "$SRC")
+    if [ "$AFTER" -gt "$BEFORE" ]; then
+      echo "CHANGED | $SRC $((BEFORE/1024/1024/1024))GB -> $((AFTER/1024/1024/1024))GB"
+    else
+      echo "OK | $SRC $((AFTER/1024/1024/1024))GB (拡張余地なし)"
+    fi
+    '@ -replace "(?m)^    "
+
+    # 初回接続時のホスト鍵確認を自動承諾（キャッシュ登録のみ。以降は -batch で非対話実行）
+    echo y | plink -ssh -pw $pass "$user@$ip" "exit" 2>$null | Out-Null
+    $out = $script | plink -batch -ssh -pw $pass "$user@$ip" "bash -s"
+    if ($LASTEXITCODE -ne 0) { throw "/data 拡張に失敗しました: $vm ($out)" }
+    $out
+  when: item.os_family == 'RHEL'  # ゲストOSがRHELの場合のみ（パラメータシート os_family）
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rhel_expand
+  changed_when: "'CHANGED' in (stdout | default(''))"
+  no_log: true  # コマンドラインにrootパスワードを含むため（結果はエビデンスタスクで可視化）
 
 # --- 9. エビデンス出力：VHDX前後差分＋ゲスト内ボリューム前後差分 ---
 - name: データディスク拡張の前後差分をエビデンス出力する
@@ -182,7 +241,7 @@
     msg:
       - "vm     : {{ item.name }}"
       - "vhd    : {{ disk_before.results[idx].stdout | trim }}GB -> {{ disk_after.results[idx].stdout | trim }}GB (target={{ item.data_disk_size_gb }}GB, changed={{ vhd_resize.results[idx].changed }})"
-      - "guest  : {{ ('drive ' ~ item.data_disk_drive_letter ~ ': ' ~ (guest_expand.results[idx].stdout | trim | from_json).before_gb ~ 'GB -> ' ~ (guest_expand.results[idx].stdout | trim | from_json).after_gb ~ 'GB (changed=' ~ (guest_expand.results[idx].stdout | trim | from_json).changed ~ ')') if item.os_type == 'windows' else 'skipped (os_type=' ~ item.os_type ~ ')' }}"
+      - "guest  : {{ ('drive ' ~ item.data_disk_drive_letter ~ ': ' ~ (guest_expand.results[idx].stdout | trim | from_json).before_gb ~ 'GB -> ' ~ (guest_expand.results[idx].stdout | trim | from_json).after_gb ~ 'GB (changed=' ~ (guest_expand.results[idx].stdout | trim | from_json).changed ~ ')') if item.os_family == 'WindowsServer' else (('/data: ' ~ (rhel_expand.results[idx].stdout | default('') | trim)) if item.os_family == 'RHEL' else 'skipped (os_family=' ~ item.os_family ~ ')') }}"
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"

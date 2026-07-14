@@ -2,8 +2,19 @@
 # 種別: ハードウェア構成（メモリ：起動メモリ／動的メモリ）
 # 対象: Hyper-Vホスト（WinRM）。VMは停止中に設定。
 # モジュール: microsoft.hyperv.hv_memory（冪等）。動的時は min/max も指定、静的時は startup のみ。
+# 実行条件: 設定前にVMの状態を取得し、停止中（State=Off）のVMのみメモリ設定を実行する。
+#          起動中等（Off以外）のVMはskip（エラーにしない。起動中のメモリ変更は不可のため安全側）。
 # 前後取得: before は read-only(win_shell)、after はモジュール登録結果(changed)で確認。
 # 変数: VAR_vm。item.memory_startup_mb / memory_dynamic / memory_min_mb / memory_max_mb。
+
+# --- 0. 事前確認：VMが停止していることを確認する ---
+- name: VMの状態を取得する（停止確認）
+  ansible.windows.win_shell: "(Get-VM -Name '{{ item.name }}').State"
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: vm_state
+  changed_when: false
 
 - name: 現在のメモリ設定を取得する（before）
   ansible.windows.win_shell: |
@@ -22,9 +33,11 @@
     startup_bytes: "{{ item.memory_startup_mb }}MB"
     minimum_bytes: "{{ item.memory_min_mb }}MB"
     maximum_bytes: "{{ item.memory_max_mb }}MB"
+  when: "'Off' in vm_state.results[idx].stdout"  # VM停止中のみ実行（起動中はskip）
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
+    index_var: idx
   register: mem_dynamic_result
 
 - name: メモリを設定する（静的メモリ・冪等モジュール hv_memory）
@@ -32,15 +45,18 @@
     vm_name: "{{ item.name }}"
     dynamic_memory_enabled: false
     startup_bytes: "{{ item.memory_startup_mb }}MB"
+  when: "'Off' in vm_state.results[idx].stdout"  # VM停止中のみ実行（起動中はskip）
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
+    index_var: idx
   register: mem_static_result
 
 - name: メモリ設定の前後差分をエビデンス出力する
   ansible.builtin.debug:
     msg:
       - "vm     : {{ item.name }}"
+      - "state  : {{ vm_state.results[idx].stdout | trim }}{{ '' if 'Off' in vm_state.results[idx].stdout else '（起動中のためメモリ設定はskip）' }}"
       - "before : {{ mem_before.results[idx].stdout | trim }}"
       - "after  : startup={{ item.memory_startup_mb }}MB"
   loop: "{{ VAR_vm }}"

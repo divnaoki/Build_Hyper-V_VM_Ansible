@@ -393,3 +393,118 @@ status: **review**（再レビュー待ち）
 - モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
 - 検証: YAML構文OK。実機での確認ポイント: ①オフラインD→オンライン化→拡張成功 ②再実行時（オンライン済み）にonlined=false でskip。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-13 set_vm_disk: ゲストログイン系タスクに ansible_os_family 条件を追加（オーナー指示）
+- 指示: Windows仮想マシンにログインして実施するタスクは ansible_os_family が Windows の場合に実行するよう修正。
+- 変更:
+  - tasks/set_vm_disk.yml のゲストログイン系3タスク（6 疎通待機 / 7 パーティション拡張 / 8 検証）の when を
+    `ansible_os_family | default('') == "Windows"` AND `item.os_type == 'windows'` の複合条件に変更。
+    - ansible_os_family: 接続先（Hyper-Vホスト）のOSファミリ判定。`default('')` によりファクト未収集時も
+      エラーにならず skip される安全側の実装。
+    - item.os_type: 従来どおり対象VMのゲストOS判定として維持（RHELゲストのskip動作を保全）。
+  - test_set_vm_disk.yml: `gather_facts: false → true`（ansible_os_family の取得に必要）。
+  - ヘッダコメント（前提）に本条件を追記。
+- ★Exastro側の留意: 本番Movement実行時も ansible_os_family を参照するため、Movement（ansible.cfg/ヘッダ設定）で
+  gather_facts が無効の場合はゲストログイン系タスクが常に skip される。Exastro登録時に gather_facts 有効化を確認すること。
+- モジュール: 変更なし → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。実機確認ポイント: ①Windowsホストで6〜8が実行される ②rhel VM（testvm02）はskip維持。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-13 set_vm_disk: ゲストOS種別をKVPで自動判定（os_typeパラメータ廃止・オーナー指示）
+- 指示: VMの中身（ゲストOS）がWindowsか否かをPlaybook内で判定したい。item.os_type はExastroパラメータシートの
+  列追加が必要になるため、パラメータシートは修正しない方向で。
+- 方式: Hyper-V統合サービスのデータ交換（KVP）がホスト側WMIに報告する OSName を読む。
+  `Get-CimInstance Msvm_ComputerSystem` → `Get-CimAssociatedInstance Msvm_KvpExchangeComponent` →
+  GuestIntrinsicExchangeItems（XML）から OSName を抽出。ゲストログイン・資格情報・パラメータシート変更すべて不要。
+- 変更:
+  - tasks 5.5 を新設「ゲストOS種別をKVPから判定する」: OSName に 'Windows' を含めば WINDOWS、
+    それ以外は OTHER。未報告時はPS内で最大6回×10秒リトライ後 OTHER 扱い（skip側に倒す）。read系・changed_when: false。
+  - tasks 6/7/8 の when を `item.os_type == 'windows'` → `'WINDOWS' in guest_os.results[idx].stdout` に変更
+    （ansible_os_family 条件は維持）。tasks 6/7 に index_var: idx を追加。
+  - tasks 9 エビデンスに「os : 判定結果＋OSName」行を追加し、skip表示も guest_os 基準に変更。
+  - defaults/main.yml・group_vars/main.yml から os_type を削除し、KVP自動判定の注記を追加。
+- 判定の性質:
+  - Windowsゲスト: 統合サービス標準搭載のため OSName 報告あり → 確実に WINDOWS 判定。
+  - Linux（hyperv-daemons あり）: OSName が Linux 名 → OTHER。
+  - Linux（hyperv-daemons なし）・起動直後で未報告: 最大60秒待って OTHER（ゲスト内拡張skip）。
+    ※ Windows VM が起動直後すぎて KVP 未報告のケースでは skip になりうるが、本ロールは start_vm 後の
+    実行前提であり、実機で skip が出る場合はリトライ回数の増加で対応する。
+- モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
+- 検証: YAML構文OK（tasks/defaults/group_vars）。実機確認ポイント: ①Windows VMで OSName 取得→WINDOWS判定→6〜8実行
+  ②RHEL VMで OTHER判定→skip ③エビデンスの os 行に OSName が出ること。
+- 既知の別課題（7/10ログ済・今回も未反映）: defaults/group_vars が os_disk_size_gb / os_disk_drive_letter のまま
+  （tasks は data_disk_*）。ローカル検証時は変数名の不一致に注意。反映要否はオーナー/PM判断待ち。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-13 set_vm_disk: ゲストOS判定を item.os_family（パラメータシート）方式へ変更（オーナー方針転換）
+- 方針: 同日実装のKVP自動判定を撤回し、パラメータシートに os_family 変数を追加して取得する方式に変更。
+  ゲストログイン系タスクは **item.os_family == 'WindowsServer'** のときのみ実行。
+- 変更:
+  - tasks/set_vm_disk.yml: タスク5.5（KVP判定）を削除。タスク6/7/8 の when を
+    `item.os_family == 'WindowsServer'` に統一（ansible_os_family ファクト条件・guest_os参照も撤去、
+    追加していた index_var も原状復帰）。タスク9 エビデンスのskip表示を `os_family=xxx` 表記に変更。
+    ヘッダコメント（前提・変数）を os_family 方式に更新。
+  - defaults/main.yml: VAR_vm メンバーに os_family を追加（新規メンバー。パラメータシートへの列追加が必要）。
+  - group_vars/main.yml: testvm01/02 に os_family: WindowsServer を追加。
+  - test_set_vm_disk.yml: gather_facts を false に戻す（ファクト参照が無くなったため。Exastro Movement側の
+    gather_facts 設定にも依存しなくなった）。
+- ★パラメータシート対応（Exastro側・必須）: VMパラメータシートに「OSファミリ（os_family）」列を追加し、
+  代入値自動登録設定で VAR_vm.os_family に紐づけること。値は 'WindowsServer'（Windows系）/ 'RHEL' 等。
+  ※ parameter-sheet-design.md への反映は 7/10 の data_disk_* 未反映分と合わせて別途実施を推奨。
+- モジュール: 変更なし → モジュールマニュアル対応不要。
+- 検証: YAML構文OK（4ファイル）。旧方式（guest_os / ansible_os_family / KVP / os_type）の残存なしをgrepで確認。
+  実機確認: ①os_family=WindowsServer のVMで6〜8実行 ②それ以外の値でskip。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-13 set_vm_memory: メモリ設定前にVM停止確認を追加（オーナー指示）
+- 指示: メモリ設定の前に仮想マシンが停止していることを確認し、停止していたら実行する。
+- 変更（tasks/set_vm_memory.yml）:
+  - タスク0を新設「VMの状態を取得する（停止確認）」: `(Get-VM).State` を取得（read・changed_when: false）。
+  - 動的/静的メモリ設定（hv_memory）2タスクに `when: "'Off' in vm_state.results[idx].stdout"` を追加
+    （index_var: idx も追加）。起動中等（Off以外）はskip（エラーにしない）。
+  - エビデンスに `state` 行を追加（skip時は「起動中のためメモリ設定はskip」を明記）。
+  - ヘッダコメントに実行条件を追記。
+- ★既存の別問題（今回未修正・要オーナー/PM判断）: 動的メモリ設定と静的メモリ設定の2タスクに
+  `item.memory_dynamic` による分岐 when が無く、**全VMに対して動的→静的の順で両方実行され、
+  常に静的設定で上書きされる**。ヘッダの変数説明（memory_dynamic）と不整合。
+  意図した動作か確認のうえ、`when: item.memory_dynamic | bool` / `when: not (item.memory_dynamic | bool)`
+  の追加を推奨。
+- モジュール: win_shell（既存）＋ hv_memory（既存）→ モジュールマニュアル対応不要。
+- 検証: YAML構文OK。実機確認: ①停止中VMで設定実行 ②起動中VMでskip＋エビデンスにskip理由表示。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-14 set_vm_disk: RHELゲストの /data パーティション拡張を追加（オーナー指示）
+- 指示: os_family=RHEL のVMに対し、/data のディスク特定 → umount → parted resizepart 100% → mount -a →
+  xfs_growfs を win_shell から実行する。rootパスワードはコマンドに記載して非対話実行。
+- 実装（tasks 8.5 新設「ゲスト内の/dataパーティションを最大まで拡張する（RHELのみ）」）:
+  - 実行経路: Hyper-Vホスト（win_shell）→ **plink.exe（PuTTY）** で SSH パスワード認証 → ゲストで bash -s 実行。
+    ※ 指示の「scp」はファイル転送コマンドのため、コマンド実行の実態に合わせ ssh（plink）実行に読み替え。
+    ※ Windows標準のOpenSSHクライアントはパスワードのコマンドライン指定不可のため plink を採用。
+    ★Hyper-Vホストに plink.exe の導入（PATH通し）が必要。初回接続のホスト鍵は echo y | plink で自動承諾。
+  - ゲストIP: Get-VMNetworkAdapter の統合サービス報告値（IPv4先頭）から自動取得（パラメータシート追加不要。
+    hyperv-daemons 起動が前提）。
+  - ゲスト内スクリプト: findmnt -n -o SOURCE /data でデバイス特定（sdXXN想定。sedで末尾数字を分離し
+    ディスク/パーティション番号を導出）→ umount → parted -s resizepart N 100% → mount -a → xfs_growfs。
+    lsblk の before/after 比較で CHANGED / OK（拡張余地なし）を返し冪等表示。set -e で失敗時は即中断。
+  - 資格情報: item.guest_admin_user / guest_admin_password を使用（RHEL行は root を想定）。
+    rootパスワードがコマンドラインに含まれるため **no_log: true**（SHOULD-5。結果はタスク9エビデンスで可視化）。
+  - タスク9 エビデンスの guest 行に RHEL 分岐（/data: CHANGED/OK …）を追加。
+  - ヘッダコメント（前提・変数）と defaults/main.yml の guest_admin_* 注記を更新。
+- 前提・制約:
+  - デバイス名は sdXX 系を想定（nvme 等の pN 形式は sed の末尾数字分離が非対応。Hyper-V では該当なし）。
+  - /data 使用中プロセスがあると umount が失敗しタスクが失敗する（意図どおりの検知）。
+  - パーティションはデバイス末尾番号（例: sdb1 → 1）を resizepart 対象とする。
+- モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。実機確認ポイント: ①RHEL VMで /data 拡張成功（CHANGED表示）②再実行で OK（拡張余地なし）
+  ③WindowsServer VMに影響なし ④plink未導入時のエラーメッセージ確認。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
