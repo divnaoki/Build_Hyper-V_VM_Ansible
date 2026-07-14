@@ -508,3 +508,75 @@ status: **review**（再レビュー待ち）
 - 検証: YAML構文OK。実機確認ポイント: ①RHEL VMで /data 拡張成功（CHANGED表示）②再実行で OK（拡張余地なし）
   ③WindowsServer VMに影響なし ④plink未導入時のエラーメッセージ確認。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-14 set_vm_disk: RHEL /data 拡張を plink → SSH鍵認証（ssh.exe）へ変更（オーナー指示）
+- 経緯: 実機で plink 未導入により CommandNotFoundException で失敗（タスク8.5）。オーナー判断で鍵認証方式へ変更。
+- 変更:
+  - tasks 8.5: plink（パスワード認証）を廃止し、Windows標準 OpenSSH クライアント（ssh.exe）＋鍵認証に変更。
+    `ssh -i <ssh_private_key_path> -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@<ip> "bash -s"`
+    - BatchMode=yes: パスワードプロンプト禁止（鍵認証失敗は即エラー）
+    - StrictHostKeyChecking=accept-new: 初回ホスト鍵を自動登録（既知ホストの鍵変化は拒否＝plink版の echo y より安全）
+    - 秘密鍵の存在チェックを追加（無ければセットアップ手順つきエラー）
+    - guest_admin_password は不使用に。機密がコマンドから消えたため no_log を撤去（失敗理由を可視化）
+  - defaults/main.yml: `ssh_private_key_path`（既定 C:\ProgramData\ssh\vm_build_ed25519）を新設。
+  - ヘッダコメント（前提・変数）を鍵認証方式に更新。
+- ★初回セットアップ（実行前に必要）:
+  1. Hyper-Vホストで鍵ペア作成: `ssh-keygen -t ed25519 -f C:\ProgramData\ssh\vm_build_ed25519 -N '""'`
+     （実行ユーザー＝WinRM接続ユーザーが読める場所/権限にすること）
+  2. 公開鍵（.pub の中身）をRHELテンプレートの /root/.ssh/authorized_keys に登録
+     （テンプレートに仕込めばインポートされる全VMで有効。sshd PermitRootLogin は既定 prohibit-password でOK）
+  3. 既存のインポート済みVMに対しては個別に authorized_keys へ追記が必要
+- モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。plink参照の残存なし。実機確認: ①鍵セットアップ後 RHEL VM で /data 拡張 CHANGED
+  ②再実行 OK ③鍵未配置時に日本語のセットアップ案内エラーが出ること。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-14 set_vm_disk: RHEL /data 拡張を鍵認証 → パスワード認証（plink）へ再変更（オーナー指示）
+- 経緯: 同日実装のSSH鍵認証（ssh.exe）を撤回し、パスワード認証に戻す方針。
+  Windows標準OpenSSHはパスワードの非対話指定が不可のため、plink.exe（PuTTY）を再採用。
+- 変更:
+  - tasks 8.5: 認証を item.guest_admin_password によるパスワード認証（plink -pw）へ戻す。
+    - defaults に **plink_path**（既定 C:\Program Files\PuTTY\plink.exe）を新設し、フルパス実行（PATH不要）。
+    - 実行前に Test-Path で plink の存在チェック（未導入時は導入案内つき日本語エラー）→ 前回の
+      CommandNotFoundException 再発時に原因が一目でわかるように。
+    - rootパスワードがコマンドラインに含まれるため no_log: true を復活（結果はタスク9エビデンスで可視化）。
+    - 初回ホスト鍵は echo y | plink で自動承諾（従来どおり）。
+  - defaults/main.yml: ssh_private_key_path を削除し plink_path に置換。
+  - ヘッダコメント（前提・変数）をパスワード認証方式に更新。鍵認証の記述残存なしを確認。
+- ★実行前の準備: Hyper-Vホストに PuTTY をインストールすること（既定パス C:\Program Files\PuTTY\）。
+  別パスに導入した場合は plink_path を上書き。
+- モジュール: win_shell（既存）のみ → モジュールマニュアル対応不要。
+- 検証: YAML構文OK。実機確認: ①PuTTY導入後 RHEL VM で /data 拡張 CHANGED ②再実行 OK
+  ③plink未導入時に導入案内エラーが出ること。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+---
+
+## 2026-07-14 set_vm_disk: RHEL /data 拡張を delegate_to 方式へ変更（オーナー指示・到達性確認済み）
+- 経緯: plink（パスワード認証）方式から、コントロールノード→ゲスト直接SSHの delegate_to 方式へ変更。
+  オーナーがコントロールノードからゲストIPへのSSH到達性を確認済み。plink（PuTTY）導入が不要になった。
+- 実装（タスク8.5を3タスク構成に分割）:
+  1. 「RHELゲストのIPアドレスを取得する」: win_shell（Hyper-Vホスト）で統合サービス報告のIPv4を取得。
+     未取得時は hyperv-daemons 確認案内つきエラー。register: rhel_ip。
+  2. 「RHELゲストを動的インベントリに登録する」: add_host で {vm名}_guest として登録。
+     ansible_host=取得IP / ansible_connection=ssh / ansible_user=item.guest_admin_user /
+     ansible_password=item.guest_admin_password / StrictHostKeyChecking=accept-new。
+     ansible_password を含むため no_log: true。
+  3. 「ゲスト内の/dataパーティションを最大まで拡張する」: ansible.builtin.shell ＋ delegate_to: {vm名}_guest。
+     bashスクリプト（findmnt→umount→parted resizepart 100%→mount -a→xfs_growfs）は従来と同一。
+     CHANGED/OK 判定・register: rhel_expand も従来どおり（タスク9エビデンスは変更不要）。
+     パスワードは接続変数として渡るためコマンドライン露出なし → 実行タスクの no_log 不要（失敗理由可視）。
+- 前提（コメントに明記）:
+  - コントロールノード（Exastro実行環境/ローカル検証機）→ ゲストIP のSSH到達性（確認済み 2026-07-14）
+  - パスワード認証SSHのため sshpass がコントロールノードに必要（Exastro実行環境は通常導入済み。
+    ローカル検証がmacの場合は brew install sshpass 等が必要な点に注意）
+- 撤去: plink 呼び出し・plink_path（defaults）・存在チェックを削除。plink参照の残存なしをgrepで確認。
+- モジュール: ansible.builtin.add_host / ansible.builtin.shell を新規使用 → モジュールマニュアル登録要否を確認すること
+  （ビルトインのため既登録の可能性あり。未登録なら Ansible_Docs へ追加）。
+- 検証: YAML構文OK。実機確認: ①RHEL VMで /data 拡張 CHANGED ②再実行 OK ③IP未取得時のエラー表示
+  ④Windows VMへの影響なし。
+- status: 実装反映済み。**PM再レビュー対象に含めること**。

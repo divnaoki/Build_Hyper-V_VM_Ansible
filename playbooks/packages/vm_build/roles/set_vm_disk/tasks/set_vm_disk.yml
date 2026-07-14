@@ -17,8 +17,9 @@
 #   - ゲスト内拡張は PowerShell Direct（Invoke-Command -VMName）で実施し、ゲストNWに依存しない。
 #   - ゲストOS種別はパラメータシートの os_family で指定する。
 #     WindowsServer: PowerShell Direct（タスク6〜8）でゲスト内パーティション拡張。
-#     RHEL: Hyper-VホストからのSSH（plink.exe・タスク8.5）で /data パーティション拡張。
-#           ★ホストに plink.exe（PuTTY）が必要。ゲストIPは統合サービス報告値から自動取得。
+#     RHEL: コントロールノードからゲストへ直接SSH（delegate_to・タスク8.5）で /data パーティション拡張。
+#           IP取得（ホスト）→ add_host（動的登録）→ delegate_to（ゲスト上でbash実行）の3段構成。
+#           ★コントロールノードからゲストIPへのSSH到達性と sshpass（パスワード認証用）が必要。
 #     上記以外: VHDX 拡張のみ行い、ゲスト内はスキップ。
 #
 # 冪等性:
@@ -29,7 +30,7 @@
 #   ただし検証(assert)・エビデンス(debug)は no_log を付けず、register済みの結果からVM名・前後サイズ・失敗理由を可視化する。
 # 変数: VAR_vm。item.os_family / data_disk_size_gb / data_disk_drive_letter / guest_admin_user / guest_admin_password。
 #       （os_family: ゲストOS種別（'WindowsServer' / 'RHEL'）。パラメータシートから取得。
-#         guest_admin_*: WindowsServer は PowerShell Direct 用、RHEL は SSH 用（root を想定））
+#         guest_admin_*: WindowsServer は PowerShell Direct 用、RHEL は SSH（delegate_to）のパスワード認証用（root を想定））
 
 # --- 1. データディスク VHDX のパスを取得する（read / hv_vhd の path に渡す） ---
 - name: データディスクVHDXのパスを取得する
@@ -183,28 +184,51 @@
     index_var: idx
 
 # --- 8.5 変更(ゲスト/RHEL)：/data パーティションを最大まで拡張（os_family=RHEL のみ） ---
-# RHELゲストはPowerShell Directが使えないため、Hyper-VホストからSSHで実行する。
-# パスワードの非対話指定が必要なため plink.exe（PuTTY）の -pw を使用（OpenSSHクライアントは
-# コマンドラインでのパスワード指定不可）。★Hyper-Vホストに plink.exe の導入とPATH通しが必要。
+# RHELゲストはPowerShell Directが使えないため、delegate_to でゲストに直接SSH接続して実行する。
+# 流れ: (a) Hyper-VホストでゲストIPを取得 → (b) add_host で動的インベントリ登録（SSH接続情報つき）
+#      → (c) delegate_to でゲスト上のbashを直接実行。
+# ★前提:
+#   - Ansibleコントロールノード（Exastro実行環境）からゲストIPへ直接SSH到達できること（確認済み 2026-07-14）。
+#   - パスワード認証SSHのため、コントロールノードに sshpass が必要（Exastro実行環境には通常導入済み）。
 # ゲストIPは統合サービス（hyperv-daemons）がホストへ報告するIPv4を自動取得（パラメータシート追加不要）。
-# root資格情報は item.guest_admin_user / guest_admin_password を使用（RHEL行は root を想定）。
+# root資格情報は item.guest_admin_user / guest_admin_password を使用（RHEL行は root を想定。
+# パスワードは ansible_password として渡すためコマンドラインに露出しない）。
 # 拡張手順（ゲスト内・bash）:
 #   findmnt で /data のデバイス(sdXXN)を特定 → umount /data → parted resizepart N 100%
 #   → mount -a → xfs_growfs /data。before/after サイズ比較で CHANGED / OK を返す（冪等）。
-- name: ゲスト内の/dataパーティションを最大まで拡張する（RHELのみ）
+- name: RHELゲストのIPアドレスを取得する（RHELのみ）
   ansible.windows.win_shell: |
     $ErrorActionPreference = 'Stop'
-    $vm = '{{ item.name }}'
-    $user = '{{ item.guest_admin_user }}'
-    $pass = '{{ item.guest_admin_password }}'
-
     # ゲストIPを統合サービスの報告値から取得（IPv4の先頭。hyperv-daemons 起動が前提）
-    $ip = (Get-VMNetworkAdapter -VMName $vm).IPAddresses |
+    $ip = (Get-VMNetworkAdapter -VMName '{{ item.name }}').IPAddresses |
       Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' } | Select-Object -First 1
-    if (-not $ip) { throw "ゲストIPを取得できません（統合サービス/hyperv-daemonsの起動を確認）: $vm" }
+    if (-not $ip) { throw "ゲストIPを取得できません（統合サービス/hyperv-daemonsの起動を確認）: {{ item.name }}" }
+    $ip
+  when: item.os_family == 'RHEL'  # ゲストOSがRHELの場合のみ（パラメータシート os_family）
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: rhel_ip
+  changed_when: false
 
-    # /data 拡張スクリプト（ゲスト側で bash -s 実行）。失敗時は set -e で即中断しタスクを失敗させる。
-    $script = @'
+- name: RHELゲストを動的インベントリに登録する（RHELのみ）
+  ansible.builtin.add_host:
+    name: "{{ item.name }}_guest"
+    ansible_host: "{{ rhel_ip.results[idx].stdout | trim }}"
+    ansible_connection: ssh
+    ansible_user: "{{ item.guest_admin_user }}"
+    ansible_password: "{{ item.guest_admin_password }}"
+    ansible_ssh_common_args: "-o StrictHostKeyChecking=accept-new"  # 初回ホスト鍵を自動登録（既知ホストの鍵変化は拒否）
+  when: item.os_family == 'RHEL'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  changed_when: false
+  no_log: true  # ansible_password を含むため（接続情報の登録のみ。実行結果は次タスクで可視化）
+
+- name: ゲスト内の/dataパーティションを最大まで拡張する（RHELのみ・ゲスト上で直接実行）
+  ansible.builtin.shell: |
     set -e
     SRC=$(findmnt -n -o SOURCE /data)
     DISK=$(echo "$SRC" | sed 's/[0-9]*$//')
@@ -220,20 +244,13 @@
     else
       echo "OK | $SRC $((AFTER/1024/1024/1024))GB (拡張余地なし)"
     fi
-    '@ -replace "(?m)^    "
-
-    # 初回接続時のホスト鍵確認を自動承諾（キャッシュ登録のみ。以降は -batch で非対話実行）
-    echo y | plink -ssh -pw $pass "$user@$ip" "exit" 2>$null | Out-Null
-    $out = $script | plink -batch -ssh -pw $pass "$user@$ip" "bash -s"
-    if ($LASTEXITCODE -ne 0) { throw "/data 拡張に失敗しました: $vm ($out)" }
-    $out
-  when: item.os_family == 'RHEL'  # ゲストOSがRHELの場合のみ（パラメータシート os_family）
+  delegate_to: "{{ item.name }}_guest"
+  when: item.os_family == 'RHEL'
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
   register: rhel_expand
   changed_when: "'CHANGED' in (stdout | default(''))"
-  no_log: true  # コマンドラインにrootパスワードを含むため（結果はエビデンスタスクで可視化）
 
 # --- 9. エビデンス出力：VHDX前後差分＋ゲスト内ボリューム前後差分 ---
 - name: データディスク拡張の前後差分をエビデンス出力する
