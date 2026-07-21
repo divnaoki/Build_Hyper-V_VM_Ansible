@@ -1,0 +1,169 @@
+---
+# 種別: ゲストOSアカウント構成（ローカル管理者ユーザーの作成＋Administrators所属）
+# 対象: Hyper-Vホスト（WinRM）。ゲスト内処理は PowerShell Direct（Invoke-Command -VMName）で実施。
+#       他の vm_build ゲスト内ロール（configure_guest_network / set_vm_disk）と同一の接続方式。
+#       ※ os_config/local_user（ゲストへ直接WinRM＋win_user）は別パッケージ・別接続方式のため本ロールでは使用しない。
+#          VM構築段階ではゲストのネットワーク/WinRMが未構成のため、VMバス経由の PowerShell Direct を採用する。
+# 前提:
+#   - 対象VMは起動済みであること（start_vm の後に実行）。start_vm 直後の起動途中による失敗を避けるため、
+#     前段にゲスト疎通待機タスク（configure_guest_network タスク1と同一パターン・until/retries:30/delay:10）を置く。
+#   - ブートストラップ認証: PowerShell Direct の資格情報はテンプレート組込の Administrator
+#     （item.guest_admin_user / item.guest_admin_password）を使う。作成する新規ユーザーとは別物。
+#   - ゲストOS種別は item.os_family で判定し、'WindowsServer' のときのみ実行（RHEL等はskip）。
+#     set_vm_disk と同じゲストOS判定方式に統一。
+# 冪等性:
+#   - Get-LocalUser で存在確認 → 無ければ New-LocalUser（PasswordNeverExpires）。既にあれば作成skip。
+#   - Get-LocalGroupMember で Administrators 所属確認 → 未所属なら Add-LocalGroupMember。所属済みならskip。
+#   - changed は「実際にユーザー作成 or グループ追加を行った場合のみ true」。
+# Administratorsグループ名の扱い（設計判断）:
+#   - 本案件は英語ロケール前提だが、ロケール差に強くするため **既定SID S-1-5-32-544 で Administrators を解決**（採用）。
+#     Get-LocalGroup -SID 'S-1-5-32-544' で実際のグループ名を取得し、以降の確認/追加はその名前で行う。
+#     文字列 'Administrators' のハードコードは避ける（多言語OSでの取りこぼし防止）。
+# 機密（SHOULD準拠）:
+#   - 資格情報（guest_admin_password）・新規ユーザーのパスワード（admin_user_password）を含むタスクは no_log:true。
+#   - 検証(assert)・エビデンス(debug)は no_log を付けず、register結果から VM名・ユーザー名・前後状態を可視化する
+#     （パスワードは PowerShell 側の返却JSONに一切含めないため露出しない）。
+# 失敗検知:
+#   - 作成/追加を要求したのに after でユーザーが存在しない/Administrators未所属なら assert で fail（黙って成功扱いにしない）。
+# 変数（VAR_vm メンバー）:
+#   item.name                  : VM名
+#   item.os_family             : ゲストOS種別（'WindowsServer' のときのみ実行）
+#   item.admin_user_name       : 作成するローカル管理者ユーザー名（パラメータシートから代入）
+#   item.admin_user_password   : 同ユーザーのパスワード（機密・no_log対象）
+#   item.guest_admin_user      : PowerShell Direct 認証用（テンプレート組込 Administrator）
+#   item.guest_admin_password  : 同上・機密（no_log対象）
+
+# --- 1. ゲストOSのPowerShell Direct疎通を待機する（WindowsServerのみ） ---
+# start_vm 直後はゲストOS起動途中で Invoke-Command -VMName が失敗しうるため、疎通できるまでリトライする。
+- name: ゲストOSのPowerShell Direct疎通を待機する
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    # ゲスト管理者の資格情報を組み立てる（平文パスワードをSecureString化してPSCredentialを生成）
+    $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
+    # PowerShell Direct（VMバス経由・ネットワーク不要）でゲスト内にコマンドを送り、'READY' が返れば疎通OKとみなす。
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ScriptBlock { 'READY' }
+  when: item.os_family == 'WindowsServer'  # ゲストOSがWindowsServerの場合のみ（パラメータシート os_family）
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: guest_ready
+  # 'READY' が取れるまで最大 30回 × 10秒 ＝ 約5分待機する（起動待ち）
+  until: guest_ready is succeeded and 'READY' in (guest_ready.stdout | default(''))
+  retries: 30
+  delay: 10
+  changed_when: false
+  no_log: true  # guest_admin_password を含むため
+
+# --- 2. ローカル管理者ユーザーを作成し Administrators に所属させる（WindowsServerのみ・冪等） ---
+# ゲスト内で Get-LocalUser / Get-LocalGroupMember により before を取得し、
+# 無ければ New-LocalUser、未所属なら Add-LocalGroupMember を実行。after と changed をJSONで返す。
+- name: ローカル管理者ユーザーを作成しAdministratorsに所属させる
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    # ゲスト管理者（Administrator）の資格情報で PowerShell Direct 接続する。
+    $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
+    $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
+    # 作成対象ユーザー名・パスワードは -ArgumentList で文字列としてゲストへ渡す（値中の記号を安全に受け渡し）。
+    Invoke-Command -VMName '{{ item.name }}' -Credential $cred -ArgumentList '{{ item.admin_user_name }}', '{{ item.admin_user_password }}' -ScriptBlock {
+      param($user, $pass)
+      $ErrorActionPreference = 'Stop'
+      # 前後状態と changed/error を貯める変数を初期化。ゲスト内で例外が出ても JSON を必ず返し、
+      # 失敗理由(error)をホスト側の no_log 無し assert/debug で可視化できるようにする（set_vm_disk MUST-3 と同方式）。
+      $gname = ''; $userBefore = $false; $memberBefore = $false
+      $userAfter = $false; $memberAfter = $false; $changed = $false; $err = ''
+      try {
+        # Administrators グループをロケール非依存の既定SIDで解決する（英語ロケール前提だが堅牢性のためSID指定）。
+        $adminGroup = Get-LocalGroup -SID 'S-1-5-32-544'
+        $gname = $adminGroup.Name
+        # 対象ユーザーが Administrators のメンバーかを判定する内部関数。
+        # メンバーの Name は "COMPUTERNAME\user" 形式のため、末尾が "\<user>" に一致するかで突き合わせる。
+        $pattern = '\\' + [regex]::Escape($user) + '$'
+        function Test-Member { param($g, $p) [bool](Get-LocalGroupMember -Group $g -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $p }) }
+
+        # before: ユーザー存在・Administrators所属を控える（冪等性判定とエビデンス用）
+        $userBefore   = [bool](Get-LocalUser -Name $user -ErrorAction SilentlyContinue)
+        $memberBefore = if ($userBefore) { Test-Member $gname $pattern } else { $false }
+
+        # 1) ユーザー作成（存在しない場合のみ）。パスワードはSecureString化。無期限（PasswordNeverExpires/AccountNeverExpires）。
+        #    UserMayNotChangePassword は付けない（指示どおり）。
+        #    ※ New-LocalUser はローカルパスワードポリシー（複雑性・最小長）違反時に例外を投げるため、try/catch で握って error に載せる。
+        if (-not $userBefore) {
+          $usec = ConvertTo-SecureString $pass -AsPlainText -Force
+          New-LocalUser -Name $user -Password $usec -PasswordNeverExpires -AccountNeverExpires | Out-Null
+          $changed = $true
+        }
+        # 2) Administrators 所属（未所属の場合のみ）
+        if (-not (Test-Member $gname $pattern)) {
+          Add-LocalGroupMember -Group $gname -Member $user
+          $changed = $true
+        }
+      } catch {
+        # 例外メッセージのみを error に格納（パスワードは含まれない）。after 取得は finally 相当で継続する。
+        $err = $_.Exception.Message
+      }
+      # after: 実際にユーザーが存在し Administrators 所属になったかを再取得（例外時も取得し、assert で検証する）
+      try { $userAfter = [bool](Get-LocalUser -Name $user -ErrorAction SilentlyContinue) } catch { $userAfter = $false }
+      try {
+        if ($gname) { $memberAfter = [bool](Get-LocalGroupMember -Group $gname -ErrorAction SilentlyContinue | Where-Object { $_.Name -match ('\\' + [regex]::Escape($user) + '$') }) }
+      } catch { $memberAfter = $false }
+      # 結果をJSONで返す（パスワードは一切含めない）。ホスト側の changed_when / assert / debug がこれを解析する。
+      [pscustomobject]@{
+        user          = $user
+        group         = $gname
+        user_before   = $userBefore
+        member_before = $memberBefore
+        user_after    = $userAfter
+        member_after  = $memberAfter
+        changed       = $changed
+        error         = $err
+      } | ConvertTo-Json -Compress
+    }
+  when: item.os_family == 'WindowsServer'  # ゲストOSがWindowsServerの場合のみ（パラメータシート os_family）
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  register: admin_user
+  changed_when: "'\"changed\":true' in (stdout | default(''))"
+  no_log: true  # guest_admin_password / admin_user_password を含むため
+
+# --- 3. ユーザー作成・Administrators所属を検証する（WindowsServerのみ・no_log無しで可視化） ---
+- name: ローカル管理者ユーザーの作成と所属を検証する
+  ansible.builtin.assert:
+    that:
+      - "((admin_user.results[idx].stdout | from_json).error | default('') | length) == 0"
+      - "(admin_user.results[idx].stdout | from_json).user_after | bool"
+      - "(admin_user.results[idx].stdout | from_json).member_after | bool"
+    fail_msg: >-
+      ローカル管理者ユーザーの作成/Administrators所属に失敗しました: {{ item.name }}
+      / user={{ item.admin_user_name }}
+      / user_after={{ (admin_user.results[idx].stdout | from_json).user_after }}
+      / member_after={{ (admin_user.results[idx].stdout | from_json).member_after }}
+      / error={{ (admin_user.results[idx].stdout | from_json).error | default('') }}
+    success_msg: >-
+      ローカル管理者ユーザーOK: {{ item.name }}
+      / user={{ item.admin_user_name }}（Administrators所属）
+    quiet: true
+  when: item.os_family == 'WindowsServer'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 4. エビデンス出力（前後状態・changed。パスワードは出力しない） ---
+- name: ローカル管理者ユーザー作成の前後状態をエビデンス出力する
+  ansible.builtin.debug:
+    msg:
+      - "vm     : {{ item.name }}"
+      - "user   : {{ item.admin_user_name }}"
+      - "group  : {{ (admin_user.results[idx].stdout | from_json).group }}"
+      - "before : exists={{ (admin_user.results[idx].stdout | from_json).user_before }} / member={{ (admin_user.results[idx].stdout | from_json).member_before }}"
+      - "after  : exists={{ (admin_user.results[idx].stdout | from_json).user_after }} / member={{ (admin_user.results[idx].stdout | from_json).member_after }}"
+      - "changed: {{ (admin_user.results[idx].stdout | from_json).changed }}"
+      - "error  : {{ (admin_user.results[idx].stdout | from_json).error | default('') }}"
+  when: item.os_family == 'WindowsServer'
+  loop: "{{ VAR_vm }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx

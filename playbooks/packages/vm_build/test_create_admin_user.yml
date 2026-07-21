@@ -1,0 +1,14 @@
+---
+# create_admin_user ローカル検証用 playbook
+# 実行: ansible-playbook test_create_admin_user.yml
+# 前提:
+#   - testvm01 / testvm02 が起動済みで PowerShell Direct 接続できること（start_vm 後を想定）。
+#   - group_vars の guest_admin_password / admin_user_password はダミー。実機検証前に実値へ差し替えること。
+#   - 接続は PowerShell Direct（VMバス経由）のため、ゲストのネットワーク/WinRM未構成でも実行可能。
+- name: 検証 - create_admin_user
+  hosts: hyperv_hosts
+  gather_facts: false
+  vars_files:
+    - roles/create_admin_user/group_vars/main.yml
+  roles:
+    - create_admin_user

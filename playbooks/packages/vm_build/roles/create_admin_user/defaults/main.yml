@@ -1,0 +1,17 @@
+---
+# create_admin_user ロール 既定値（ゲスト内ローカル管理者ユーザーの作成＋Administrators所属）
+# 接続はすべて PowerShell Direct（Invoke-Command -VMName）。os_config/local_user（直接WinRM）とは別方式。
+# 本ロールは対象VMのゲスト内に管理者ユーザーを1つ作成し、Administrators グループへ所属させる（冪等）。
+#
+# 参照する VAR_vm メンバー:
+#   - name:                     VM名
+#     os_family: WindowsServer         ゲストOS種別。'WindowsServer' のときのみ実行（RHEL等はskip）
+#     admin_user_name: "svc_admin"     作成するローカル管理者ユーザー名（パラメータシートから代入）
+#     admin_user_password: "********"  同ユーザーのパスワード・機密(no_log)
+#   ※ 運用制約: admin_user_name / admin_user_password には単一引用符 ' を使用しないこと
+#     （win_shell の PowerShell リテラル 'xxx' に埋め込むため、' を含むと文字列が壊れる。既存ロール共通の制約）。
+#     guest_admin_user: "Administrator"      PowerShell Direct 認証用（テンプレート組込 Administrator）
+#     guest_admin_password: "********"        同上・機密(no_log)
+#
+# 実行時は Exastro パラメータシートの複数具体値変数 VAR_vm で上書きする（loop: VAR_vm で全VM処理）。
+VAR_vm: []

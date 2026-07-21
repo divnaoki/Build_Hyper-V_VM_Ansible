@@ -580,3 +580,124 @@ status: **review**（再レビュー待ち）
 - 検証: YAML構文OK。実機確認: ①RHEL VMで /data 拡張 CHANGED ②再実行 OK ③IP未取得時のエラー表示
   ④Windows VMへの影響なし。
 - status: 実装反映済み。**PM再レビュー対象に含めること**。
+
+
+## 2026-07-21 create_admin_user 新規作成（exastro_engineer → PMレビュー依頼）
+- 依頼: vm_build パッケージに新規ロール `create_admin_user` を追加。WindowsServerゲスト内にローカル管理者ユーザーを
+  1つ作成し Administrators グループへ所属させる。接続は他の vm_build ゲスト内ロールと同じ **PowerShell Direct**。
+- 成果物:
+  - `playbooks/packages/vm_build/roles/create_admin_user/tasks/main.yml`（include_tasks のみ）
+  - `playbooks/packages/vm_build/roles/create_admin_user/tasks/create_admin_user.yml`（本体・4タスク）
+  - `playbooks/packages/vm_build/roles/create_admin_user/defaults/main.yml`（VAR_vm: [] ＋変数説明）
+  - `playbooks/packages/vm_build/roles/create_admin_user/group_vars/main.yml`（検証値 testvm01/02）
+  - `playbooks/packages/vm_build/test_create_admin_user.yml`（検証playbook）
+  - `README.md`（ロール表・実行順・変数早見・詳細節に create_admin_user を追記。他ロール記述は不変）
+- 採用した設計判断:
+  - **接続方式**: PowerShell Direct（`Invoke-Command -VMName`）。VM構築段階はゲストのNW/WinRM未構成のため。
+    os_config/local_user（直接WinRM＋win_user）は別パッケージ・別接続方式のため参照せず。
+  - **ブートストラップ認証**: PowerShell Direct は `item.guest_admin_user`/`guest_admin_password`（テンプレート組込
+    Administrator）を使用。疎通待機は configure_guest_network タスク1と同一パターン（SecureString→PSCredential・
+    until/retries:30/delay:10）。
+  - **Administrators グループ名**: 英語ロケール前提だが、ロケール差に強くするため **既定SID `S-1-5-32-544`**
+    （`Get-LocalGroup -SID`）で解決する方式を**採用**。文字列 'Administrators' のハードコードは回避。
+  - **冪等性**: `Get-LocalUser` 存在確認→無ければ `New-LocalUser`（PasswordNeverExpires/AccountNeverExpires。
+    UserMayNotChangePassword は付けない）。`Get-LocalGroupMember` 所属確認→未所属なら `Add-LocalGroupMember`。
+    changed は「実際に作成 or 追加した場合のみ true」（返却JSONの changed を changed_when で判定）。
+  - **os_family ガード**: 全タスク（疎通待機/作成/検証/エビデンス）に `when: item.os_family == 'WindowsServer'`
+    を付与（set_vm_disk と同じゲストOS判定方式に統一。RHEL等はskip）。
+  - **パスワード必須化**: オーナー指示はユーザー名の変数化のみだが、ユーザー作成にパスワードは必須のため
+    `item.admin_user_password` を機密変数として設計（no_log 対象）。
+  - **機密/失敗検知**: 資格情報・パスワードを含むタスク（疎通待機・作成）は `no_log: true`。検証(assert)・
+    エビデンス(debug)は no_log 無しで VM名・ユーザー名・前後状態(before/after)・changed を可視化
+    （パスワードは返却JSONに含めないため露出しない）。作成/追加を要求したのに after で未作成/未所属なら
+    assert で fail（黙って成功扱いにしない）。
+- モジュール: `ansible.windows.win_shell` / `ansible.builtin.include_tasks` / `assert` / `debug`（既存 vm_build ロールと同一・
+  新規モジュールなし）。Obsidian `Ansible_Docs/` に全4件登録済みを確認（新規登録なし）。
+- 構文チェック: 全yaml `python3 yaml.safe_load_all` OK。`ansible-playbook test_create_admin_user.yml --syntax-check` OK。
+- パラメータシート反映（要反映事項）: パラメータシートに **`admin_user_name`**（列）を追加し VAR_vm.admin_user_name へ紐づけ、
+  併せて **`admin_user_password`**（機密列）を VAR_vm.admin_user_password へ紐づける必要がある。
+  ※ 本タスクでは `parameter-sheet-design.md` は書き換えていない（7/10 以降の data_disk_* / os_family 等の未反映分と同様、
+    パラメータシート改訂は別途まとめて実施する既存の扱いに合わせた）。反映要否・タイミングはオーナー/PM判断。
+- 実機検証（要実施・環境起動時）: ①新規作成→Administrators所属で changed=true ②再実行で冪等 changed=false
+  ③os_family が WindowsServer 以外で skip。
+- 他ロール（set_vm_disk 等）のファイルは一切変更していない。Obsidian への設計書登録・_index 更新は未実施（PM approved ゲート前）。
+- 主な確認依頼ポイント:
+  1. Administrators を SID `S-1-5-32-544` で解決する判断（英語ロケール前提でも堅牢側を採用）の妥当性。
+  2. パスワードを機密変数 `admin_user_password` として追加した判断（オーナー指示はユーザー名の変数化のみ）。
+  3. no_log 範囲（疎通待機・作成タスクのみ）とエビデンス可視化のバランス。
+  4. パラメータシートへの admin_user_name / admin_user_password 反映のタイミング。
+- status: **review**（PMレビュー待ち）
+
+#### 2026-07-21 PM 1stレビュー結果: **fixing（approved見送り）**
+観点: 冪等性 / 前後状態取得 / 命名規則 / 不要タスク混入 / 機密
+
+良かった点（OK）:
+- 命名規則・ファイル構成（main.yml→include_tasks→create_admin_user.yml、defaults/group_vars/test_*.yml、READMEへの追記）は規約準拠。他ロール未変更。
+- 冪等性: Get-LocalUser→New-LocalUser / Get-LocalGroupMember→Add-LocalGroupMember の存在・所属チェック、changed は実変更時のみ true。妥当。
+- Administrators を SID S-1-5-32-544 で解決（ロケール非依存）は堅牢で良い。承認。
+- `-ArgumentList` でユーザー名/パスワードをスクリプトブロックの param として渡し、ゲスト内コマンドへの値インジェクションを避けている点は良い。
+- os_family ガード（全4タスク）、疎通待機（configure_guest_network タスク1と同一パターン）、前後エビデンス・assert による失敗検知（黙って成功にしない）も妥当。
+- パスワードを機密変数 admin_user_password として追加した判断＝承認（作成に必須のため妥当。ただしパラメータシート反映が必要）。
+
+**[MUST-1] no_log:true のタスク2が New-LocalUser のパスワードポリシー違反エラーを隠蔽する**
+- WindowsServer の `New-LocalUser` はローカルパスワードポリシー（複雑性・最小長）を強制し、違反時に例外を投げる（実運用で頻出）。
+- 現状タスク2は `no_log: true` かつスクリプトブロック内が try/catch 無しのため、New-LocalUser / Add-LocalGroupMember が失敗すると
+  タスクが失敗するがエラー全文が no_log で隠れ、オペレーターは失敗理由（パスワードポリシー違反 等）を追えない。
+- 本案件は set_vm_disk の [MUST-3] で同種問題に対処済み（ゲスト内処理を try/catch で握り、error を返却JSONに載せ、
+  no_log 無しの assert/debug で可視化）。同じ確立パターンに揃えること。
+- 対応案: スクリプトブロックを try/catch し、失敗時も `[pscustomobject]@{ ... ; error = $_.Exception.Message }` を
+  JSON で返す（パスワードは載せない）。changed_when は現状維持。タスク3 assert を「error が空 かつ user_after/member_after が真」で判定し、
+  fail_msg に error を出す。これにより no_log でも失敗理由が assert 経由で見える。
+
+**[SHOULD-2] 単一引用符を含むパスワード/ユーザー名で win_shell 文字列リテラルが壊れる（既存コード共通の制約）**
+- `-ArgumentList '{{ item.admin_user_password }}', '{{ item.admin_user_name }}'` は外側 win_shell テキストへ素の値を
+  単一引用符で埋め込むため、値に `'` が含まれると PowerShell 構文エラーになる。configure_guest_network の
+  `ConvertTo-SecureString '{{ item.guest_admin_password }}'` 等と同じ既存パターンの制約で、本ロール固有の新規劣化ではない。
+- 対応（任意・推奨）: 値の `'`→`''` エスケープ、または疎通待機タスク（タスク1）でも同様に統一。少なくともパスワードに
+  単一引用符を使わない運用制約を README/変数コメントに明記。MUST ではない。
+
+判定: **fixing**。MUST-1 を修正し再レビュー依頼のこと。SHOULD-2 は対応推奨（最低限ドキュメント注記）。
+その他（SID解決・パスワード機密変数化・os_family ガード・パラメータシート反映方針）は承認。パラメータシート反映は既存未反映分と併せて別途で可。
+
+
+#### 2026-07-21 exastro_engineer 修正対応（→ 再レビュー依頼 status: review）
+- **[MUST-1] 対応**: タスク2のスクリプトブロックを try/catch で囲み、失敗時も返却JSONに `error`（例外メッセージ）を載せる方式へ
+  変更（set_vm_disk MUST-3 と同パターン）。
+  - 前後状態変数（user_before/member_before/user_after/member_after/changed/error）を try の外で初期化し、
+    try 内で SID解決→before取得→New-LocalUser（未存在時）→Add-LocalGroupMember（未所属時）を実行。例外は catch で
+    `$err = $_.Exception.Message`（パスワードは一切含めない）。after（user_after/member_after）は例外時も別 try/catch で継続取得。
+  - `changed` は New-LocalUser / Add-LocalGroupMember 成功後にのみ true にするため、ポリシー違反で例外時は changed=false のまま
+    （false changed を出さない）。changed_when は現状維持（`"changed":true` in stdout）。
+  - **タスク3 assert** の `that` を「`error` が空（`... | from_json).error | default('') | length == 0`）**かつ** user_after **かつ**
+    member_after」に変更。fail_msg に `error` を追加し、no_log:true のタスク2でも失敗理由（パスワードポリシー違反 等）が
+    assert 経由で必ず見えるようにした。
+  - **タスク4 debug** のエビデンスに `error` 行を追加（常時出力。失敗時のみ意味を持つ）。パスワードは返却JSONに含めないため露出しない。
+  - 机上確認: New-LocalUser がパスワードポリシー違反で例外を投げるケースを想定すると、catch で error にメッセージが入り、
+    user_after=false のままタスク2は成功（rc=0でJSON返却）→ タスク3 assert が error 非空＋user_after=false で fail し、
+    fail_msg に error が表示される。従来の「no_log で失敗理由が消える」問題を解消。
+- **[SHOULD-2] 対応（ドキュメント注記）**: `admin_user_name` / `admin_user_password` に**単一引用符 `'` を使わない**運用制約を
+  `roles/create_admin_user/defaults/main.yml` の変数コメントと `README.md`（create_admin_user 詳細節）に明記。
+  値の `''` エスケープ実装は任意のため今回は未実施（既存ロール共通の制約であり本ロール固有の劣化ではないため）。
+- 変更ファイル: `roles/create_admin_user/tasks/create_admin_user.yml`（タスク2/3/4）/ `roles/create_admin_user/defaults/main.yml` /
+  `README.md`（create_admin_user 詳細節に運用制約・失敗理由可視化を追記）。他ロールは未変更。Obsidian登録なし。
+- モジュール構成変更なし（win_shell/assert/debug/include_tasks）→ モジュールマニュアル対応不要（既登録4件のまま）。
+- 検証: 全yaml `python3 yaml.safe_load_all` OK。`ansible-playbook test_create_admin_user.yml --syntax-check` OK。
+- 実機検証（要実施・環境起動時）: ①新規作成→Administrators所属で changed=true ②再実行で冪等 changed=false
+  ③os_family が WindowsServer 以外で skip ④**パスワードポリシー違反値を渡した場合に error が assert 経由で表示され fail すること**。
+- status: **review**（再レビュー待ち）
+
+#### 2026-07-21 PM 再レビュー結果: **approved（設計レビュー・条件付き）**
+- [MUST-1]（no_log失敗理由の隠蔽）: タスク2 ScriptBlock を try/catch で囲み、例外時も `error` を返却JSONに格納（パスワード非混入）、
+  `after`（user_after/member_after）は例外時も別 try/catch で継続取得、`changed` は成功時のみ true を確認。タスク3 assert を
+  「error 空 かつ user_after かつ member_after」に変更し fail_msg に error を出力、タスク4 debug に error 行追加も確認。
+  set_vm_disk MUST-3 と同方式で隠蔽解消。**解消OK**。
+- [SHOULD-2]（単一引用符制約）: defaults 変数コメント・README に「admin_user_name/password に `'` を使わない」運用制約の明記を確認。OK。
+- 独立検証: 全5 yaml の safe_load_all OK、`ansible-playbook test_create_admin_user.yml --syntax-check` OK（PM側で再実行）。
+- 冪等性・命名規則・SID解決・os_family ガード・-ArgumentList 受け渡し・前後エビデンス・不要タスク混入なし、いずれも良好。
+- **判定: approved（設計レビュー）**。
+- **条件（残必須）**: 環境起動時に実機検証を実施すること。特に ①新規作成→Administrators所属で changed=true
+  ②再実行で冪等 changed=false ③os_family≠WindowsServer で skip ④パスワードポリシー違反値で error が assert 経由で表示され fail。
+- **要反映（別途）**: パラメータシート（parameter-sheet-design.md）へ admin_user_name（列）＋ admin_user_password（機密列）を追加し
+  VAR_vm へ紐づけ。既存未反映分（data_disk_* / os_family 等）とまとめて実施。
+- **次工程**: Conductor 定義への組み込み位置決定（start_vm 後・os_config 前が候補。ゲスト疎通と guest_admin 認証が前提）。
+- status: **approved**（Playbook はObsidian登録対象外＝恒久保管のまま。設計書作成時に本ロールを反映）

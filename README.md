@@ -46,10 +46,11 @@ hyperv-vm-build/
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
 | **configure_guest_network** | ゲストOSに**固定3LAN**（サーバ/管理/バックアップ）のIPアドレスを設定する。LAN=仮想スイッチ1:1（**VLAN不使用**）で、各LANの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。LAN種別→スイッチ名は defaults の `switch_map` で解決し、その接続先スイッチの既存vNICをMACで特定して、ゲスト内でそのNICに各LANのIP（`segments[0].{sv,mgmt,bk}_lan_ip/prefix`）を設定する。接続は PowerShell Direct。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **create_admin_user** | ゲスト内に**ローカル管理者ユーザー**（`admin_user_name`）を作成し、**Administrators グループ**（既定SID `S-1-5-32-544` で解決）へ所属させる。`Get-LocalUser`/`Get-LocalGroupMember` で存在・所属を確認し、無い場合のみ `New-LocalUser`/`Add-LocalGroupMember` を実行（冪等）。接続は PowerShell Direct（`item.os_family == 'WindowsServer'` のみ）。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
-> （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network`
-> ※ `set_vm_disk` / `configure_guest_network` のゲスト内設定はVM起動が前提のため、`start_vm` の後に実行します。
+> （ファームウェア/時刻同期）→ `start_vm` → `set_vm_disk` → `configure_guest_network` → `create_admin_user`
+> ※ `set_vm_disk` / `configure_guest_network` / `create_admin_user` のゲスト内設定はVM起動が前提のため、`start_vm` の後に実行します。
 
 ---
 
@@ -137,6 +138,7 @@ VAR_vm:
 # configure_guest_network: name / os_type / guest_admin_user / guest_admin_password /
 #   segments: [ { sv_lan_ip, sv_lan_prefix, mgmt_lan_ip, mgmt_lan_prefix, bk_lan_ip, bk_lan_prefix } ]  ← 固定3LAN（配列先頭[0]・固定キー）
 #   ※ LAN種別→スイッチ名は defaults の switch_map（sv_lan/mgmt_lan/bk_lan）で解決（環境固定・代入値ではない）
+# create_admin_user: name / os_family / admin_user_name / admin_user_password / guest_admin_user / guest_admin_password
 ```
 
 ### ③ `playbooks/provisioning/group_vars/all.yml`
@@ -244,6 +246,24 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - ホストから各VMへ各LANで疎通確認するには、ホスト側にも各スイッチの管理OS vNICが必要
   （Internalスイッチなら既定で作成される。Privateスイッチはホストから疎通不可）。VM内・VM同士の通信だけなら不要。
 - ゲスト内設定のみのため `start_vm` の後（VM稼働中）に実行する。
+
+### create_admin_user（ローカル管理者ユーザー作成）
+- ゲスト内に **ローカル管理者ユーザー**（`item.admin_user_name`）を作成し、**Administrators グループ**へ所属させる。
+  接続は **PowerShell Direct**（`Invoke-Command -VMName`。os_config/local_user の直接WinRM＋win_user とは別方式）。
+  VM構築段階ではゲストのネットワーク/WinRMが未構成のため、他の vm_build ゲスト内ロールと同じVMバス経由で実施する。
+- **ブートストラップ認証**は テンプレート組込 Administrator（`guest_admin_user`/`guest_admin_password`）を使用する
+  （作成する新規ユーザーとは別物）。
+- **冪等**: `Get-LocalUser` で存在確認 → 無ければ `New-LocalUser`（`PasswordNeverExpires`。`UserMayNotChangePassword` は付けない）。
+  `Get-LocalGroupMember` で Administrators 所属確認 → 未所属なら `Add-LocalGroupMember`。実際に作成/追加した場合のみ changed=true。
+- **Administrators グループは既定SID `S-1-5-32-544` で解決**する（英語ロケール前提だがロケール差に強くするため）。
+- **失敗検知**: 作成/追加を要求したのに after でユーザー未作成/未所属なら assert で fail（黙って成功扱いにしない）。
+  before/after（ユーザー存在・所属）と changed をエビデンス出力（**パスワードは出力しない**）。
+- **機密**: 資格情報・ユーザーパスワードを含むタスクは `no_log: true`。
+- **運用制約**: `admin_user_name` / `admin_user_password` に**単一引用符 `'` を使わない**こと
+  （`win_shell` の PowerShell リテラル `'xxx'` へ埋め込むため、`'` を含むと文字列が壊れる。既存ロール共通の制約）。
+- **失敗理由の可視化**: ゲスト内処理は try/catch で握り、失敗時は返却JSONの `error` に例外メッセージを載せて
+  no_log 無しの assert/debug で表示する（New-LocalUser のパスワードポリシー違反等を隠蔽しない。パスワードは出力しない）。
+- `item.os_family == 'WindowsServer'` のときのみ実行（RHEL等はskip）。ゲスト内設定のため `start_vm` の後に実行する。
 
 ### AWS検証環境（provisioning）
 - **Hyper-Vのネスト仮想化はベアメタル(`.metal`)インスタンスでのみ可能**。料金が高く起動も遅い（10〜20分）。
