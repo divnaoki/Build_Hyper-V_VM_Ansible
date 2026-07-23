@@ -1,10 +1,13 @@
 ---
 # local_user 既定値
-# VAR_users: 作成するローカルユーザーのリスト（バンドルON）
+# VAR_users: 作成／Administrators所属確認するローカルユーザーのリスト（バンドルON）
 #   - name: "ユーザー名"
-#     password: "********"            # 機密（no_log）
-#     groups: ["Administrators"]      # 既定 Administrators
+#     password: "********"            # 機密（no_log）。作成時のみ使用（update_password: on_create）。
+#                                      # 既存ユーザーには適用されない（パスワードを毎回上書きしない）。
 #     description: "説明"
 #     password_never_expires: true
 #     user_cannot_change_password: false
+#     fullname: "表示名"               # 任意
+#     state: present                   # 任意（既定 present）
+# 所属先グループは Administrators 固定（SID S-1-5-32-544 で解決）。groups は VAR では指定しない。
 VAR_users: []

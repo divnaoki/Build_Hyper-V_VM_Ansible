@@ -701,3 +701,64 @@ status: **review**（再レビュー待ち）
   VAR_vm へ紐づけ。既存未反映分（data_disk_* / os_family 等）とまとめて実施。
 - **次工程**: Conductor 定義への組み込み位置決定（start_vm 後・os_config 前が候補。ゲスト疎通と guest_admin 認証が前提）。
 - status: **approved**（Playbook はObsidian登録対象外＝恒久保管のまま。設計書作成時に本ロールを反映）
+
+---
+
+#### 2026-07-23 local_user 存在確認→分岐フロー改修（exastro_engineer → PMレビュー依頼）
+- 対象: `packages/os_config/roles/local_user/`（os_config は各VMへ**直接WinRM**接続。create_admin_user の PowerShell Direct とは別方式）。
+- 背景: 従来は単一の win_user タスクのみ（update_password 未指定＝always）で、**既存ユーザーのパスワードに毎回触れる**問題があった。
+  オーナー指示の「存在確認→分岐」フローへ改修。
+- 改修後フロー（VAR_users 各ユーザー、loop）:
+  1. **before 取得**（win_shell / changed_when:false）: Administrators を SID `S-1-5-32-544` で解決し、
+     `Get-LocalUser` で存在有無、`Get-LocalGroupMember` の Name 末尾一致（"COMPUTERNAME\user" 形式）で Administrators 所属有無を JSON 取得。register: user_before。
+  2. **作成タスク**（win_user）: `when: not before.exists`。name/password/groups:[解決したAdmin名]/groups_action:add/state/password_never_expires/user_cannot_change_password。
+     **update_password: on_create**（作成時のみパスワード設定＝既存を上書きしない）。password を含むため **no_log:true**。
+  3. **所属追加タスク**（win_group_membership）: `when: before.exists and not before.member`。name:[解決したAdmin名]/members:[user]/state:present。
+     パスワード・他属性は変更しない。**password を渡さないため no_log 不要**で可視化。
+  4. **after 取得**（win_shell / changed_when:false）: 存在・所属を再取得。register: user_after。
+  5. **assert**（no_log なし）: error 空 かつ exists かつ member を検証（黙って成功にしない）。
+  6. **debug エビデンス**（no_log なし）: user/group/before(exists,member)/after(exists,member)/action（created / group-added / no-change）。password は非出力。
+- **所属追加モジュール選定理由**: `ansible.windows.win_group_membership` を採用。
+  ユーザーアカウント属性（パスワード等）に一切触れず**グループ所属のみ**を冪等に追加できる専用モジュールで、
+  パスワードを渡す必要がなく（no_log 不要で可視化しやすい）、「所属だけ足す」意図が最も明確なため。
+  win_user + groups + update_password:on_create でも所属追加は可能だが、意図明確さ・パスワード非関与の観点で専用モジュールを優先。
+- **update_password の扱い**: 作成タスクのみ `on_create`（既存ユーザーのパスワードを毎回上書きしない）。所属追加は win_group_membership でパスワード非関与。
+- **Administrators 解決**: 文字列ハードコードを避け SID `S-1-5-32-544` → 実名解決（create_admin_user と方式統一）。所属判定は Name 末尾一致。
+- 変更ファイル: `roles/local_user/tasks/local_user.yml`（全面改修）/ `roles/local_user/defaults/main.yml`（VAR_users コメント更新・groups 廃止）/
+  `roles/local_user/group_vars/main.yml`（コメント更新・groups 廃止）。`tasks/main.yml`・`test_local_user.yml` は変更なし。他ロール・他パッケージ未変更。
+- モジュールマニュアル: 使用 FQCN = win_shell / win_user / win_group_membership / assert / debug。
+  **win_group_membership を新規に Obsidian `Ansible_Docs/` へ登録**（`ansible.windows.win_group_membership.md`）。他4件は既登録。
+- 検証: 全4 yaml + test_local_user.yml `python3 yaml.safe_load_all` OK。`ansible-playbook test_local_user.yml --syntax-check` OK。
+- 実機検証（要実施・環境起動時）: ①新規ユーザー→作成＋Administrators所属で changed=true
+  ②既存＋未所属→所属追加のみ changed=true（**パスワード不変**）③既存＋所属済み→changed=false ④再実行で全体 changed=false。
+- PMレビューで特に見てほしい点:
+  - 所属追加に win_group_membership（専用モジュール）を採用した判断の妥当性（win_user 統一 vs 専用モジュール）。
+  - win_group_membership の members に **プレーンな username** を渡している点（ローカルユーザー前提。ドメイン参加ホストでは `.\username` 明示の要否）。
+  - before/after の SID 解決失敗時（Get-LocalGroup -SID 失敗）は try/catch で error に格納し assert で fail する設計でよいか。
+- status: **review**（PMレビュー待ち）
+
+#### 2026-07-23 PM レビュー結果: **approved（設計レビュー・条件付き）**
+観点: 冪等性 / 前後状態取得 / 命名規則 / 不要タスク混入 / 機密 / モジュール選定
+対象: os_config/local_user 「存在確認→分岐」フロー改修。
+
+良かった点（OK）:
+- オーナー指示のフローに正確に一致。before(存在/所属)取得→未存在はwin_user作成+Admin所属→存在かつ未所属は所属のみ追加→after検証、の分岐（when）が正しい。
+- **冪等性の実挙動を確認**: ①新規=作成+所属 ②既存未所属=所属追加のみ ③既存所属済=no-change、いずれも意図どおり。再実行で changed=false。
+- **update_password: on_create** で既存ユーザーのパスワードを毎回上書きする従来問題（未指定＝always）を解消。良い改善。
+- 所属追加に **win_group_membership**（専用モジュール・パスワード非関与）を採用。属性を触らず所属だけ足す意図が明確で妥当。state:present で既存メンバー削除もしない。
+- Administrators を SID S-1-5-32-544 で解決（create_admin_user と統一・ロケール非依存）。所属判定は末尾一致。
+- before/after 取得は changed_when:false、assert/debug は no_log 無しで可視化（password 非扱い）。命名規則・構成も規約準拠。モジュールマニュアル（win_group_membership 新規登録含む）全件登録済み。
+
+**[SHOULD-1] 作成タスク(win_user)の no_log:true が失敗理由を隠蔽し得る（モジュール制約により部分対応）**
+- win_user は内部的に New-LocalUser 相当で、パスワードポリシー違反時に失敗する（create_admin_user MUST-1 と同種）。現状 no_log:true・ignore_errors 無しのため、失敗すると play が censored のままハードストップし、no_log 無しの after-assert（タスク5）に到達しない。
+- ただし create_admin_user（win_shell）と異なり、**モジュールタスクは try/catch で失敗理由を安全に取り出せない**（password 露出を避けるため no_log を外せない）。完全な理由抽出は原理的に不可。到達可能な改善は「失敗を after-assert 経由で可視化する（exists=false を明示）」まで。
+- 推奨対応（非ブロック）: タスク2 win_user に `ignore_errors: true` ＋ `register` を付け、作成失敗時も after-assert（タスク5）へ処理を流し、`exists=false` で明確に fail させる。win_user 固有の失敗文言は censored のままとなる旨をコメントに明記。
+- ※ create_admin_user は MUST（win_shellで完全抽出が低コストで可能なため）、本ロールは SHOULD（モジュール制約で部分対応が上限）という判断差を明記。
+
+**[NIT-2] state:absent が分岐フローで機能しない**
+- タスク2は `state: item.state|default('present')` を保持するが `when: not exists` のため、既存ユーザーに state:absent を指定しても削除されず、かつ after-assert（exists=true 要求）で紛らわしい失敗になる。
+- 本ロールの用途（管理者作成＋所属保証）では削除は対象外。`state` パラメータを落として常に present にするか、README に「削除は非対応」を明記する方が誤用を防げる（任意）。
+
+判定: **approved（設計レビュー）**。SHOULD-1・NIT-2 は推奨（非ブロック）。
+- **条件（残必須）**: 環境起動時に実機検証。①新規=作成+Admin所属 changed=true ②既存+未所属=所属追加のみ changed=true（パスワード不変を確認）③既存+所属済 changed=false ④再実行で全体 changed=false ⑤（可能なら）ドメイン参加ホストでの members 指定（`.\user` 要否）確認。
+- status: **approved**（Playbook はObsidian登録対象外＝恒久保管）。

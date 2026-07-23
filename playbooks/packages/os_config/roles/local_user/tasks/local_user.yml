@@ -1,15 +1,69 @@
 ---
-# 種別: ローカルユーザー作成（Administratorsグループに追加）
-# 対象: Windows Server 2022（直接WinRM）。
-# モジュール: ansible.windows.win_user（冪等）。
-# 機密: password を含むため no_log。エビデンスはユーザー名のみ。
-# 変数: VAR_users[]（name / password / groups（既定 Administrators） / description / flags）バンドルON。
+# 種別: ローカルユーザー作成＋Administrators所属（存在確認→分岐フロー）
+# 対象: Windows Server 2022。os_config パッケージは各VMへ**直接WinRM**接続
+#       （vm_build/create_admin_user の PowerShell Direct とは別方式）。本ロールは接続先ゲスト上で直接実行する。
+# 処理フロー（オーナー指示・厳守）: VAR_users の各ユーザーについて
+#   1. 存在確認（Get-LocalUser） … before で取得
+#   2. 存在する場合、Administrators 所属確認（Get-LocalGroupMember） … before で取得
+#   3. 未作成 → win_user で作成し Administrators に所属（when: 未存在）
+#   4. 存在するが未所属 → 所属だけ追加（when: 存在 かつ 未所属）。パスワード・他属性は変更しない
+#   5. 存在済み＋所属済み → 何もしない（冪等・changed=false）
+#
+# Administratorsグループの扱い（設計判断・create_admin_user と方式統一）:
+#   - ロケール非依存の既定SID **S-1-5-32-544** で Administrators を解決し、以降は取得した実名を使う。
+#     文字列 'Administrators' のハードコードは避ける（多言語OSでの取りこぼし防止）。
+#   - 所属判定は Get-LocalGroupMember の Name（"COMPUTERNAME\user" 形式）末尾一致で行う。
+#
+# モジュール選定:
+#   - ユーザー作成: ansible.windows.win_user（指示どおり）。password を含むため no_log:true。
+#     update_password: on_create … **作成時のみパスワードを設定**し、既存ユーザーのパスワードを毎回上書きしない
+#     （従来の単一タスクは update_password 未指定＝always で既存ユーザーのパスワードに毎回触れる問題があった）。
+#   - 所属追加（存在かつ未所属）: ansible.windows.win_group_membership を採用。
+#     ユーザーアカウント属性に一切触れず**グループ所属のみ**を冪等に追加できる専用モジュールで、
+#     パスワードを渡す必要がない（no_log 不要で可視化しやすい）。win_user の groups でも可能だが、
+#     所属だけ足す意図が明確な本モジュールを選定（review-log に選定理由記載）。
+#
+# 機密: password を含むタスク（作成）のみ no_log:true。before/after 取得・assert・debug は
+#       ユーザー名/グループ名/存在有無/所属有無のみ扱い password を含まないため no_log を付けず可視化する。
+#
+# 変数: VAR_users[]（name / password / description / password_never_expires / user_cannot_change_password / fullname / state）バンドルON。
 
-- name: ローカルユーザーを作成しグループに追加する
+# --- 1. before: 各ユーザーの「存在有無」「Administrators所属有無」を取得する（参照のみ・changed_when:false） ---
+# Administrators を SID で解決し、Get-LocalUser / Get-LocalGroupMember の結果を JSON で返す。
+# この結果を以降の分岐（when）とエビデンスに使う。password は扱わない。
+- name: ローカルユーザーの存在とAdministrators所属を取得する（before）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $user = '{{ item.name }}'
+    $gname = ''; $exists = $false; $member = $false; $err = ''
+    try {
+      # Administrators をロケール非依存の既定SIDで解決（実名を取得して以降で使う）
+      $gname = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+      # ユーザー存在確認
+      $exists = [bool](Get-LocalUser -Name $user -ErrorAction SilentlyContinue)
+      # 所属判定: メンバー Name の末尾が "\<user>" に一致するか（"COMPUTERNAME\user" 形式）
+      if ($exists) {
+        $pattern = '\\' + [regex]::Escape($user) + '$'
+        $member = [bool](Get-LocalGroupMember -Group $gname -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $pattern })
+      }
+    } catch {
+      $err = $_.Exception.Message
+    }
+    [pscustomobject]@{ user = $user; group = $gname; exists = $exists; member = $member; error = $err } | ConvertTo-Json -Compress
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: user_before
+  changed_when: false
+
+# --- 2. 未存在ユーザーを作成し Administrators に所属させる（when: 存在しない） ---
+# win_user で作成＋Administrators所属。update_password: on_create で作成時のみパスワード設定。
+- name: 未作成のローカルユーザーを作成しAdministratorsに所属させる
   ansible.windows.win_user:
     name: "{{ item.name }}"
     password: "{{ item.password }}"
-    groups: "{{ item.groups | default(['Administrators']) }}"
+    update_password: on_create
+    groups: "{{ [ (user_before.results[idx].stdout | from_json).group ] }}"
     groups_action: add
     state: "{{ item.state | default('present') }}"
     password_never_expires: "{{ item.password_never_expires | default(true) }}"
@@ -19,11 +73,88 @@
   loop: "{{ VAR_users | default([]) }}"
   loop_control:
     label: "{{ item.name }}"
-  no_log: true
-  register: user_result
+    index_var: idx
+  when: not ((user_before.results[idx].stdout | from_json).exists | bool)
+  no_log: true  # password を含むため
 
-- name: ユーザー作成エビデンスを出力する（パスワードは出力しない）
+# --- 3. 存在するが未所属のユーザーを Administrators に所属追加する（when: 存在 かつ 未所属） ---
+# win_group_membership で所属のみ追加（パスワード・他属性は変更しない）。既存メンバーは削除しない（state: present）。
+- name: 既存ユーザーをAdministratorsに所属追加する（所属のみ・属性変更なし）
+  ansible.windows.win_group_membership:
+    name: "{{ (user_before.results[idx].stdout | from_json).group }}"
+    members:
+      - "{{ item.name }}"
+    state: present
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+  when:
+    - (user_before.results[idx].stdout | from_json).exists | bool
+    - not ((user_before.results[idx].stdout | from_json).member | bool)
+
+# --- 4. after: 分岐後の「存在有無」「Administrators所属有無」を再取得する（参照のみ・changed_when:false） ---
+- name: ローカルユーザーの存在とAdministrators所属を再取得する（after）
+  ansible.windows.win_shell: |
+    $ErrorActionPreference = 'Stop'
+    $user = '{{ item.name }}'
+    $gname = ''; $exists = $false; $member = $false; $err = ''
+    try {
+      $gname = (Get-LocalGroup -SID 'S-1-5-32-544').Name
+      $exists = [bool](Get-LocalUser -Name $user -ErrorAction SilentlyContinue)
+      if ($exists) {
+        $pattern = '\\' + [regex]::Escape($user) + '$'
+        $member = [bool](Get-LocalGroupMember -Group $gname -ErrorAction SilentlyContinue | Where-Object { $_.Name -match $pattern })
+      }
+    } catch {
+      $err = $_.Exception.Message
+    }
+    [pscustomobject]@{ user = $user; group = $gname; exists = $exists; member = $member; error = $err } | ConvertTo-Json -Compress
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: user_after
+  changed_when: false
+
+# --- 5. 検証: 対象ユーザーが存在 かつ Administrators 所属 であることを assert（黙って成功にしない） ---
+# password を含まないため no_log は付けず可視化する。
+- name: ローカルユーザーの存在とAdministrators所属を検証する（after）
+  ansible.builtin.assert:
+    that:
+      - "((user_after.results[idx].stdout | from_json).error | default('') | length) == 0"
+      - "(user_after.results[idx].stdout | from_json).exists | bool"
+      - "(user_after.results[idx].stdout | from_json).member | bool"
+    fail_msg: >-
+      ローカルユーザーの存在/Administrators所属に失敗しました:
+      user={{ item.name }}
+      / exists={{ (user_after.results[idx].stdout | from_json).exists }}
+      / member={{ (user_after.results[idx].stdout | from_json).member }}
+      / error={{ (user_after.results[idx].stdout | from_json).error | default('') }}
+    success_msg: >-
+      ローカルユーザーOK: user={{ item.name }}
+      （{{ (user_after.results[idx].stdout | from_json).group }} 所属）
+    quiet: true
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
+
+# --- 6. エビデンス: ユーザーごとに before→after→実施アクションを出力（password は出力しない） ---
+# action: created（before未存在）/ group-added（before存在かつ未所属）/ no-change（before存在かつ所属済み）
+- name: ローカルユーザー処理の前後状態とアクションをエビデンス出力する
   ansible.builtin.debug:
     msg:
-      - "users  : {{ VAR_users | default([]) | map(attribute='name') | list }}"
-      - "groups : 既定 Administrators（groups_action=add）"
+      - "user   : {{ item.name }}"
+      - "group  : {{ (user_after.results[idx].stdout | from_json).group }}"
+      - "before : exists={{ (user_before.results[idx].stdout | from_json).exists }} / member={{ (user_before.results[idx].stdout | from_json).member }}"
+      - "after  : exists={{ (user_after.results[idx].stdout | from_json).exists }} / member={{ (user_after.results[idx].stdout | from_json).member }}"
+      - >-
+        action : {{ 'created'
+        if not ((user_before.results[idx].stdout | from_json).exists | bool)
+        else ('group-added'
+        if not ((user_before.results[idx].stdout | from_json).member | bool)
+        else 'no-change') }}
+  loop: "{{ VAR_users | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+    index_var: idx
