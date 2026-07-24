@@ -25,6 +25,7 @@ Exastroの「機器一覧」に各VMを登録し、メニューグループ「OS
 | 6 | Firewallプロファイル | `VAR_fw_profiles` | ON | windows_firewall |
 | 7 | Firewallルール | `VAR_fw_rules` | ON | windows_firewall |
 | 8 | サービス設定 | `VAR_services` | ON | service_config |
+| 9 | UAC設定（ソフトウェア制御） | `VAR_uac_level` | OFF | uac_config |
 
 ---
 
@@ -105,11 +106,36 @@ Exastroの「機器一覧」に各VMを登録し、メニューグループ「OS
 
 > `disabled` にできないサービスは Playbook側で自動的に `manual` にフォールバックする。
 
+## 9. UAC設定（ソフトウェア制御 / 表2.2.3）
+
+| 項目名 | 代入先 | 型 | 必須 | 既定/例 |
+|--------|--------|----|------|---------|
+| UAC通知レベル | `VAR_uac_level` | プルダウン | ○ | `notify_default`（アプリの変更時のみ通知＝Windows既定・本システム設定値） |
+
+> **UAC有効化（EnableLUA）は代入項目にしない（環境固定）**。本システムは UAC を常に有効（`EnableLUA=1`）で
+> 運用する方針（表2.2.3の設定対象は「通知タイミング」のみ）。運用者が誤って UAC を無効化できないよう、
+> パラメータシートには出さず、ロール defaults の環境固定値（`VAR_uac_enablelua: 1`）として扱う。（PM SHOULD-1）
+
+プルダウン選択肢（`VAR_uac_level`）と対応レジストリ値:
+
+| 選択肢 | 意味 | ConsentPromptBehaviorAdmin | PromptOnSecureDesktop |
+|--------|------|:--:|:--:|
+| `always` | 常に通知 | 2 | 1 |
+| **`notify_default`** | **アプリがコンピュータに変更を加えようとする場合のみ通知する（既定）** | **5** | **1** |
+| `notify_nodim` | アプリの変更時のみ通知（デスクトップを暗転しない） | 5 | 0 |
+| `never` | 通知しない | 0 | 0 |
+
+> `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System` に DWORD で設定。
+> レジストリ値のマッピングは環境固定（ロール defaults の `uac_level_map`）で、パラメータシートからは
+> **レベル名（プルダウン）のみ**を代入する。`EnableLUA` を 0→1/1→0 に変更した場合のみ再起動が必要
+> （`finalize_reboot` に集約）。通知レベルの変更は再起動なしで反映される。
+> 本システムは表2.2.3のとおり既定値（`notify_default`）で運用する。
+
 ---
 
 ## 代入値自動登録設定 / 接続
 - 接続: 各対象サーバへ直接WinRM（Exastro機器一覧に Administrator / WinRM(5986/ntlm) を登録）。
-- 単一値メニュー（IPv6/ダンプ）は単一具体値変数、リスト系はバンドルON（複数具体値変数）。
+- 単一値メニュー（IPv6/ダンプ/UAC）は単一具体値変数、リスト系はバンドルON（複数具体値変数）。
 - 機密項目（ユーザパスワード）は入力タイプ=パスワード、Playbook側 `no_log`。
 - 再起動は Conductor 末尾の `finalize_reboot`（`reboot_required` 集約）で1回。
 

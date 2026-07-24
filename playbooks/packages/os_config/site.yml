@@ -15,6 +15,7 @@
     - local_user
     - disable_ipv6
     - memory_dump
+    - uac_config
     - windows_firewall
     - service_config
     - finalize_reboot   # reboot_required が true のときのみ再起動

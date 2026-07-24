@@ -7,12 +7,22 @@
 #       既存vNICをMACで特定して各LANのIPを設定する。
 # 構成: LAN種別→接続先スイッチ名の対応は switch_map（defaults/main.yml・環境固定）で解決。
 #       ip/prefix は Exastro 代入値（segments）から取得する。
-# 冪等性: 現在IPが目標と一致なら変更しない。
+# ゲートウェイ: サーバLAN（sv_lan）のみ、代入値 sv_lan_gateway でデフォルトゲートウェイを設定する。
+#       管理LAN（mgmt_lan）/ バックアップLAN（bk_lan）はゲートウェイを設定しない（＝空白）。
+#       gateway は文字列として扱い（[int]変換はしない。prefix=0事件と同種の「静かに不正値」を回避）、
+#       未定義/null/空文字（IsNullOrWhiteSpace）なら「設定しない」に倒す。
+#       永続化: 既定ルート(0.0.0.0/0)は ActiveStore（即時反映）と PersistentStore（再起動後も残す）の両ストアに
+#       登録する（New-NetRoute 既定の ActiveStore のみだと再起動後にIPは残るがGWだけ消える非対称障害になるため）。
+#       mgmt/bk の空白化も両ストアから 0.0.0.0/0 を除去して再起動後も空白を保証する。
+# 冪等性: 現在IPが目標と一致なら IP は変更しない。ゲートウェイは IP 変更の有無とは独立に反映する
+#       （IPが既に一致していても、既定ルートが未設定/不一致なら設定する）。
+#       ゲートウェイの冪等判定は「ActiveStore の NextHop が目標一致 かつ PersistentStore にも同一ルートあり」で no-op。
 # 機密: 資格情報を含むタスクは no_log:true。検証(assert)・エビデンス(debug)は register結果から可視化。
 # 変数:
 #   VAR_vm[]  : item.name / guest_admin_user / guest_admin_password / segments[0]
 #   segments[0]（Exastro代入値・固定キー）:
-#     sv_lan_ip / sv_lan_prefix / mgmt_lan_ip / mgmt_lan_prefix / bk_lan_ip / bk_lan_prefix
+#     sv_lan_ip / sv_lan_prefix / sv_lan_gateway / mgmt_lan_ip / mgmt_lan_prefix / bk_lan_ip / bk_lan_prefix
+#     ※ sv_lan_gateway は sv_lan 専用（サーバLANのデフォルトゲートウェイ）。mgmt_lan/bk_lan にゲートウェイ変数は無い。
 #   switch_map（defaults・環境固定）: sv_lan / mgmt_lan / bk_lan → 接続先の仮想スイッチ名
 
 # --- 1. ゲストOSのPowerShell Direct疎通を待機する ---
@@ -36,10 +46,11 @@
   changed_when: false
   # no_log: true
 
-# --- 2. LAN種別→スイッチ名でvNICをMAC特定（ホスト）＋ ゲスト内で各LANのIPを設定 ---
+# --- 2. LAN種別→スイッチ名でvNICをMAC特定（ホスト）＋ ゲスト内で各LANのIP・ゲートウェイを設定 ---
 # switch_map で各LAN（サーバ/管理/バックアップ）の接続先スイッチ名を解決し、そのスイッチに接続された
 # 既存vNICのMACをホスト側で取得。PowerShell Direct でゲスト内のMAC一致NICにIPを設定し、結果をJSONで返す。
-- name: 固定3LAN（サーバ/管理/バックアップ）のIPを設定する
+# サーバLAN（sv_lan）のみ、代入値 sv_lan_gateway が非空ならデフォルトゲートウェイ（既定ルート 0.0.0.0/0）を設定する。
+- name: 固定3LAN（サーバ/管理/バックアップ）のIP・ゲートウェイを設定する
   ansible.windows.win_shell: |
     $ErrorActionPreference = 'Stop'
     $vm = '{{ item.name }}'
@@ -53,12 +64,15 @@
     {{ switch_map | to_json }}
     '@ | ConvertFrom-Json
 
-    # 固定キーの代入値を、共通処理しやすいよう「LAN種別・スイッチ名・IP・プレフィックス」の内部リストに正規化する。
+    # 固定キーの代入値を、共通処理しやすいよう「LAN種別・スイッチ名・IP・プレフィックス・ゲートウェイ」の内部リストに正規化する。
     # スイッチ名は switch_map から、IP/プレフィックスは代入値(segments)から取る。prefix はint化しておく（New-NetIPAddress用）。
+    # gateway は sv_lan のみ代入値 sv_lan_gateway、mgmt_lan/bk_lan は空文字（＝設定しない）。
+    #   ※ gateway は文字列のまま扱い [int] 変換はしない（prefix=0事件と同種の「$null→0 で静かに不正値」を回避）。
+    #     未定義/null の場合 $seg.sv_lan_gateway は $null になるが、後段の IsNullOrWhiteSpace 判定で「設定しない」に倒す。
     $lans = @(
-      [pscustomobject]@{ lan='sv_lan';   switch=$map.sv_lan;   ip=$seg.sv_lan_ip;   prefix=[int]$seg.sv_lan_prefix },
-      [pscustomobject]@{ lan='mgmt_lan'; switch=$map.mgmt_lan; ip=$seg.mgmt_lan_ip; prefix=[int]$seg.mgmt_lan_prefix },
-      [pscustomobject]@{ lan='bk_lan';   switch=$map.bk_lan;   ip=$seg.bk_lan_ip;   prefix=[int]$seg.bk_lan_prefix }
+      [pscustomobject]@{ lan='sv_lan';   switch=$map.sv_lan;   ip=$seg.sv_lan_ip;   prefix=[int]$seg.sv_lan_prefix;   gateway=$seg.sv_lan_gateway },
+      [pscustomobject]@{ lan='mgmt_lan'; switch=$map.mgmt_lan; ip=$seg.mgmt_lan_ip; prefix=[int]$seg.mgmt_lan_prefix; gateway='' },
+      [pscustomobject]@{ lan='bk_lan';   switch=$map.bk_lan;   ip=$seg.bk_lan_ip;   prefix=[int]$seg.bk_lan_prefix;   gateway='' }
     )
 
     # 1) ホスト側で、各LANのスイッチ名に一致する既存vNICを探しMACアドレスを収集する（vNICの作成・スイッチ接続はしない）。
@@ -70,11 +84,11 @@
       $match = @(Get-VMNetworkAdapter -VMName $vm | Where-Object { $_.SwitchName -eq $s.switch })
       if ($match.Count -eq 0) { throw "LAN '$($s.lan)' のスイッチ '$($s.switch)' に接続されたvNICが見つかりません（テンプレートで接続済みのはず）: $vm" }
       if ($match.Count -gt 1) { throw "LAN '$($s.lan)' のスイッチ '$($s.switch)' に複数のvNICが接続されています（1スイッチ1vNIC前提。テンプレート構成を確認）: $vm" }
-      # ゲストに渡す最小限の情報（LAN種別／スイッチ名／MAC／設定IP／プレフィックス長）を1件ずつ積む
-      $payload += [pscustomobject]@{ lan = $s.lan; switch = $s.switch; mac = $match[0].MacAddress; ip = $s.ip; prefix = $s.prefix }
+      # ゲストに渡す最小限の情報（LAN種別／スイッチ名／MAC／設定IP／プレフィックス長／ゲートウェイ）を1件ずつ積む
+      $payload += [pscustomobject]@{ lan = $s.lan; switch = $s.switch; mac = $match[0].MacAddress; ip = $s.ip; prefix = $s.prefix; gateway = $s.gateway }
     }
 
-    # 2) 収集したMAC＋IP情報をゲスト内に渡し、PowerShell Direct 経由でMAC一致のNICにIPを設定する。
+    # 2) 収集したMAC＋IP情報をゲスト内に渡し、PowerShell Direct 経由でMAC一致のNICにIP・ゲートウェイを設定する。
     #    Invoke-Command の -ArgumentList は文字列で渡すのが安全なため、payload を一旦JSON文字列化して受け渡す。
     $sec  = ConvertTo-SecureString '{{ item.guest_admin_password }}' -AsPlainText -Force
     $cred = New-Object System.Management.Automation.PSCredential('{{ item.guest_admin_user }}', $sec)
@@ -86,17 +100,22 @@
       # 要素が1件だとConvertFromでスカラーになりforeachが回らないため、配列へ正規化する。
       $items = $payloadJson | ConvertFrom-Json
       if ($items -isnot [System.Array]) { $items = @($items) }
-      $changed = $false   # 1つでもIP変更が発生したか（changed_when 判定に使う）
-      $out = @()          # LANごとの結果（前後IP・成否）を貯めるエビデンス配列
+      $changed = $false   # 1つでもIP変更 or ゲートウェイ変更が発生したか（changed_when 判定に使う）
+      $out = @()          # LANごとの結果（前後IP・前後ゲートウェイ・成否）を貯めるエビデンス配列
       foreach ($it in $items) {
         # MACアドレスの区切り記号（- や :）を除去し大文字化して、ゲスト内NICと突き合わせる
         $macN = ($it.mac -replace '[-:]', '').ToUpper()
         $nic = Get-NetAdapter | Where-Object { ($_.MacAddress -replace '[-:]', '').ToUpper() -eq $macN } | Select-Object -First 1
         # 該当MACのNICが見つからなければ、このLANは失敗として記録し次へ（他LANの設定は続行）
-        if (-not $nic) { $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; ok = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
+        if (-not $nic) { $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; ok = $false; ok_gw = $false; err = "NIC not found (MAC=$($it.mac))" }; continue }
         $ifIndex = $nic.ifIndex
+
+        # --- (a) IPアドレス設定（従来ロジックを維持） ---
         # 設定前の現IPを控える（冪等性判定とエビデンス用）
         $before  = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress
+        # 目標ゲートウェイ（空白なら「設定しない」）。IP設定より前に、変更前の既定ルートNextHopを控える（エビデンス用）。
+        $gw = $it.gateway
+        $gwBefore = (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
         # 冪等性: 現IPが目標と一致していれば何もしない。異なる場合のみ既存IPv4を除去してから新規IPを付与する。
         if ($before -ne $it.ip) {
           Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Remove-NetIPAddress -Confirm:$false -ErrorAction SilentlyContinue
@@ -105,7 +124,61 @@
         }
         # 設定後IPを再取得し、目標IPが実際に付いているか（ok）を確認してエビデンスに残す
         $after = (Get-NetIPAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -eq $it.ip } | Select-Object -First 1).IPAddress
-        $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip) }
+
+        # --- (b) デフォルトゲートウェイ設定（sv_lan のみ非空。IP変更の有無とは独立に反映する） ---
+        # gateway は文字列として判定する（[int] 変換はしない）。空/未定義（IsNullOrWhiteSpace）なら「設定しない」に倒す。
+        #
+        # ★永続化（重要）: New-NetIPAddress で設定したIPは既定で永続だが、New-NetRoute の既定 PolicyStore は
+        #   ActiveStore（現ブートセッションのみ・非永続）。ActiveStore だけに入れると「再起動後にIPは残るが
+        #   既定ゲートウェイだけ消える」非対称障害になる。これを避けるため、既定ルートは
+        #   ActiveStore（即時反映）と PersistentStore（再起動後も残す）の**両ストア**を対象に操作する。
+        #
+        # 現ストア状態を取得するローカル関数（当該IFの 0.0.0.0/0 の NextHop を各ストアから取る）。
+        function Get-DefRouteNextHop([int]$ifx, [string]$store) {
+          (Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifx -PolicyStore $store -ErrorAction SilentlyContinue | Select-Object -First 1).NextHop
+        }
+        $gwChanged = $false
+        if (-not [string]::IsNullOrWhiteSpace($gw)) {
+          # 目標ゲートウェイあり（sv_lan）。冪等判定＝「ActiveStore の NextHop が目標と一致 かつ
+          # PersistentStore にも同一 NextHop のルートがある」なら no-op。どちらか欠けていれば作り直す。
+          $curActive     = Get-DefRouteNextHop $ifIndex 'ActiveStore'
+          $curPersistent = Get-DefRouteNextHop $ifIndex 'PersistentStore'
+          if (($curActive -ne $gw) -or ($curPersistent -ne $gw)) {
+            # 既存の 0.0.0.0/0 を両ストアから除去してから、両ストアへ目標ゲートウェイで追加する。
+            Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -PolicyStore ActiveStore     -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+            Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -PolicyStore PersistentStore -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+            # ActiveStore＝即時反映、PersistentStore＝再起動後も残す（2ストアに入れて永続＋即時を両立）。
+            New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -NextHop $gw -PolicyStore ActiveStore     -ErrorAction Stop | Out-Null
+            New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -NextHop $gw -PolicyStore PersistentStore -ErrorAction Stop | Out-Null
+            $gwChanged = $true
+          }
+        } else {
+          # 目標ゲートウェイなし（mgmt_lan / bk_lan）。「その他LANは空白」を保証するため、当該IFに既定ルートが
+          # 残っていれば除去して空白化する（既存が無ければ no-op で冪等）。
+          # ★永続対応: PersistentStore に永続ルートが残ると再起動後に空白が崩れるため、ActiveStore/PersistentStore
+          #   の**両方**を除去対象にする（両ストアで「既定ルートなし」を保証）。
+          # ※ これはデフォルトゲートウェイを sv_lan に一本化する意図（7/10以前の実装も 0.0.0.0/0 除去を行っていた）。
+          #   代替案: 既存の既定ルートに一切触れない（除去しない）実装も可。過剰と判断する場合は本 else ブロックを
+          #   「何もしない」に変更してよい（PM判断に委ねる）。静的IP構成のため通常これらIFに既定ルートは無い想定。
+          $curActive     = Get-DefRouteNextHop $ifIndex 'ActiveStore'
+          $curPersistent = Get-DefRouteNextHop $ifIndex 'PersistentStore'
+          if ((-not [string]::IsNullOrWhiteSpace($curActive)) -or (-not [string]::IsNullOrWhiteSpace($curPersistent))) {
+            Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -PolicyStore ActiveStore     -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+            Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -PolicyStore PersistentStore -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+            $gwChanged = $true
+          }
+        }
+        if ($gwChanged) { $changed = $true }
+        # 設定後の既定ルート NextHop を各ストアから再取得（ActiveStore＝実効値、PersistentStore＝再起動後の値）。
+        $gwAfter           = Get-DefRouteNextHop $ifIndex 'ActiveStore'
+        $gwAfterPersistent = Get-DefRouteNextHop $ifIndex 'PersistentStore'
+        # 永続化されているか（エビデンス用）: 目標ありなら PersistentStore が目標と一致、目標なしなら PersistentStore も空。
+        if (-not [string]::IsNullOrWhiteSpace($gw)) { $gwPersisted = ($gwAfterPersistent -eq $gw) } else { $gwPersisted = [string]::IsNullOrWhiteSpace($gwAfterPersistent) }
+        # ゲートウェイの成否: 目標ありなら「ActiveStore==目標 かつ 永続化済み」、目標なし（空白要求）なら
+        # 「ActiveStore が空 かつ PersistentStore も空（＝再起動後も空白）」であること。
+        if (-not [string]::IsNullOrWhiteSpace($gw)) { $okGw = (($gwAfter -eq $gw) -and $gwPersisted) } else { $okGw = ([string]::IsNullOrWhiteSpace($gwAfter) -and $gwPersisted) }
+
+        $out += [pscustomobject]@{ lan = $it.lan; switch = $it.switch; mac = $it.mac; before = $before; after = $after; ok = ($after -eq $it.ip); gw = $gw; gw_before = $gwBefore; gw_after = $gwAfter; gw_after_persistent = $gwAfterPersistent; gw_persisted = $gwPersisted; ok_gw = $okGw }
       }
       # 全LANの結果と変更有無をJSONで返す（ホスト側の assert / debug / changed_when がこれを解析する）
       [pscustomobject]@{ segments = $out; changed = $changed } | ConvertTo-Json -Compress -Depth 5
@@ -118,22 +191,26 @@
   changed_when: '''"changed":true'' in (stdout | default(''''))'
   no_log: true
 
-# --- 3. 全LANのIP設定が成功したことを検証する ---
-- name: 全LANのIP設定を検証する
+# --- 3. 全LANのIP設定＋ゲートウェイ設定が目標どおりであることを検証する ---
+# ok=false（IP設定失敗）が1件でもあれば fail。加えて ok_gw=false（sv_lan のゲートウェイ未設定/不一致、
+# または mgmt_lan/bk_lan のゲートウェイが空白でない）が1件でもあれば fail する（黙って不正値で成功にしない）。
+- name: 全LANのIP・ゲートウェイ設定を検証する
   ansible.builtin.assert:
     that:
       - "((guest_net.results[idx].stdout | from_json).segments | selectattr('ok', 'equalto', false) | list | length) == 0"
+      - "((guest_net.results[idx].stdout | from_json).segments | selectattr('ok_gw', 'equalto', false) | list | length) == 0"
     fail_msg: >-
-      一部LANのIP設定に失敗しました: {{ item.name }}
+      一部LANのIPまたはゲートウェイ設定に失敗しました: {{ item.name }}
       / 詳細: {{ (guest_net.results[idx].stdout | from_json).segments }}
-    success_msg: "全LAN IP設定OK: {{ item.name }}"
+    success_msg: "全LAN IP・ゲートウェイ設定OK: {{ item.name }}"
     quiet: true
   loop: "{{ VAR_vm }}"
   loop_control:
     label: "{{ item.name }}"
     index_var: idx
 
-# --- 4. エビデンス出力（LAN別の前後） ---
+# --- 4. エビデンス出力（LAN別の前後：IP＋ゲートウェイ） ---
+# segments には lan / before / after / ok（IP）と gw / gw_before / gw_after / ok_gw（ゲートウェイ）が含まれる。
 - name: 固定3LAN設定の結果をエビデンス出力する
   ansible.builtin.debug:
     msg:

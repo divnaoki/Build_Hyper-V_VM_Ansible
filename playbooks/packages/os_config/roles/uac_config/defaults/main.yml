@@ -1,0 +1,22 @@
+---
+# uac_config 既定値（ソフトウェア制御 / UAC設定：表2.2.3）
+# VAR_uac_level: UAC通知レベル（プルダウン）。パラメータシートから代入する。
+#   always         = 常に通知
+#   notify_default = アプリがコンピュータに変更を加えようとする場合のみ通知する（既定・本システム設定値）
+#   notify_nodim   = アプリの変更時のみ通知（セキュアデスクトップに切り替えない＝デスクトップを暗転しない）
+#   never          = 通知しない
+VAR_uac_level: notify_default
+
+# UAC自体の有効/無効（EnableLUA）。**環境固定値・パラメータシートからは代入しない**（PM SHOULD-1）。
+# 本システムは既定どおり常に有効（1）で運用する。0 にすると UAC が完全に無効化され再起動が必要になるため、
+# 運用者が誤って無効化できないよう代入項目には出さない。
+VAR_uac_enablelua: 1
+
+# UACレベル → レジストリ値のマッピング（環境固定・代入値ではない）
+#   ConsentPromptBehaviorAdmin / PromptOnSecureDesktop の組み合わせが
+#   Windowsの「UACスライダー」4段階に対応する。
+uac_level_map:
+  always:         { ConsentPromptBehaviorAdmin: 2, PromptOnSecureDesktop: 1 }
+  notify_default: { ConsentPromptBehaviorAdmin: 5, PromptOnSecureDesktop: 1 }
+  notify_nodim:   { ConsentPromptBehaviorAdmin: 5, PromptOnSecureDesktop: 0 }
+  never:          { ConsentPromptBehaviorAdmin: 0, PromptOnSecureDesktop: 0 }

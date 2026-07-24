@@ -1,0 +1,65 @@
+---
+# 種別: ソフトウェア制御 / UAC設定（ユーザーアカウント制御）。表2.2.3。
+# 対象: Windows Server 2022（直接WinRM）。
+# モジュール: ansible.windows.win_regedit。
+# 設定: HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+#       EnableLUA / ConsentPromptBehaviorAdmin / PromptOnSecureDesktop。
+# 方針: 外部プログラムが変更を加える際に通知されるよう、UACを既定値（notify_default）で運用する。
+# 再起動: EnableLUA を変更した場合は再起動が必要。reboot_required に集約する。
+#         （ConsentPromptBehaviorAdmin / PromptOnSecureDesktop は再起動なしで反映される）
+# 変数: VAR_uac_level（プルダウン。パラメータシートから代入）/ VAR_uac_enablelua（既定1=有効）。
+
+# 入力チェック: VAR_uac_level が既知のレベルであることを保証する
+- name: UACレベルの妥当性を検証する
+  ansible.builtin.assert:
+    that:
+      - VAR_uac_level in uac_level_map.keys() | list
+    fail_msg: >-
+      VAR_uac_level が不正です（{{ VAR_uac_level }}）。
+      許容値: {{ uac_level_map.keys() | list | join(' / ') }}
+    quiet: true
+
+# [SHOULD-3] before取得: 現在のUAC関連レジストリをエビデンス用に取得する
+- name: 現在のUAC設定を取得する（before）
+  ansible.windows.win_shell: |
+    $p = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System'
+    $k = Get-ItemProperty -Path $p -ErrorAction SilentlyContinue
+    "EnableLUA={0} ConsentPromptBehaviorAdmin={1} PromptOnSecureDesktop={2}" -f `
+      $k.EnableLUA, $k.ConsentPromptBehaviorAdmin, $k.PromptOnSecureDesktop
+  register: uac_before
+  changed_when: false
+
+- name: UACを有効化する（EnableLUA）
+  ansible.windows.win_regedit:
+    path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+    name: EnableLUA
+    data: "{{ VAR_uac_enablelua | default(1) }}"
+    type: dword
+  register: uac_enablelua_reg
+
+- name: UAC通知レベルを設定する（ConsentPromptBehaviorAdmin / PromptOnSecureDesktop）
+  ansible.windows.win_regedit:
+    path: HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System
+    name: "{{ item.name }}"
+    data: "{{ item.data }}"
+    type: dword
+  loop:
+    - { name: "ConsentPromptBehaviorAdmin", data: "{{ uac_level_map[VAR_uac_level].ConsentPromptBehaviorAdmin }}" }
+    - { name: "PromptOnSecureDesktop",      data: "{{ uac_level_map[VAR_uac_level].PromptOnSecureDesktop }}" }
+  loop_control:
+    label: "{{ item.name }}"
+
+# EnableLUA を変更した場合のみ再起動が必要。reboot_required に集約する
+- name: 再起動要否を集約する
+  ansible.builtin.set_fact:
+    reboot_required: "{{ reboot_required | default(false) or uac_enablelua_reg.changed }}"
+
+- name: UAC設定エビデンスを出力する
+  ansible.builtin.debug:
+    msg: >-
+      UAC before=[{{ uac_before.stdout | default('') | trim }}]
+      -> level={{ VAR_uac_level }}
+      (EnableLUA={{ VAR_uac_enablelua | default(1) }},
+      ConsentPromptBehaviorAdmin={{ uac_level_map[VAR_uac_level].ConsentPromptBehaviorAdmin }},
+      PromptOnSecureDesktop={{ uac_level_map[VAR_uac_level].PromptOnSecureDesktop }})
+      enablelua_changed={{ uac_enablelua_reg.changed }}

@@ -762,3 +762,225 @@ status: **review**（再レビュー待ち）
 判定: **approved（設計レビュー）**。SHOULD-1・NIT-2 は推奨（非ブロック）。
 - **条件（残必須）**: 環境起動時に実機検証。①新規=作成+Admin所属 changed=true ②既存+未所属=所属追加のみ changed=true（パスワード不変を確認）③既存+所属済 changed=false ④再実行で全体 changed=false ⑤（可能なら）ドメイン参加ホストでの members 指定（`.\user` 要否）確認。
 - status: **approved**（Playbook はObsidian登録対象外＝恒久保管）。
+
+#### 2026-07-23 オーナー確認: local_user 実機検証 OK → 条件充足
+- オーナーより実機検証OKの報告を受領。approved（設計・条件付き）の残条件＝実機検証を充足し、**approved 確定**とする。
+- SHOULD-1（win_user no_log 失敗隠蔽・モジュール制約で部分対応）/ NIT-2（state:absent 非対応）は非ブロックの推奨事項として残置（対応要否はオーナー判断）。
+
+---
+
+## 2026-07-23 configure_guest_network sv_lanデフォルトゲートウェイ追加・他LAN空白（オーナー指示）
+- 指示: サーバLAN（sv_lan）にパラメータシート代入のデフォルトゲートウェイを設定し、その他LAN（mgmt_lan/bk_lan）は
+  ゲートウェイを空白にする（設定しない）。gateway は 2026-07-10 に一度全削除された経緯があり、今回 sv_lan 限定で復活する差分。
+- 変更ファイル:
+  - `roles/configure_guest_network/tasks/configure_guest_network.yml`: タスク2に gateway 処理を追加。
+    $lans 正規化に gateway 列（sv_lan=`$seg.sv_lan_gateway` / mgmt_lan・bk_lan=空文字 `''`）を追加し payload に載せる。
+    ゲスト内で IP設定（従来ロジック維持）の後に、IF単位で既定ルート(0.0.0.0/0)を制御。返却JSONの各LAN要素に
+    `gw`/`gw_before`/`gw_after`/`ok_gw` を追加。タスク3 assert に ok_gw 検証を追加。タスク4 debug は segments に
+    gateway 情報を含む。ヘッダ変数コメント更新。
+  - `defaults/main.yml` / `group_vars/main.yml`: segments の sv_lan に `sv_lan_gateway` を追加（検証値 "192.168.20.1"・
+    実環境差し替え前提）。mgmt/bk には追加せず。変数コメント更新。
+  - `parameter-sheet-design.md`: ネットワーク項目に `sv_lan_gateway`（サーバLAN デフォルトゲートウェイ・sv_lan専用）を追記。
+    他LANはゲートウェイ列を持たない旨を明記（7/10以降の未反映分 data_disk_* / os_family 等には手を付けず）。
+  - `README.md`: configure_guest_network のモジュール表・変数早見・詳細節にゲートウェイ仕様（sv_lan限定・他LAN空白・
+    IP独立の冪等性・null/空の扱い・永続性の留意）を反映。
+- 冪等性設計（IP変更と独立に gateway を反映）:
+  - sv_lan（gateway 非空）: `Get-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex` の NextHop が目標と一致
+    していれば何もしない（changed=false）。不一致/未設定なら既存 0.0.0.0/0 を `Remove-NetRoute -Confirm:$false` してから
+    `New-NetRoute -DestinationPrefix '0.0.0.0/0' -InterfaceIndex $ifIndex -NextHop $gw` で追加（changed=true）。
+    IP設定ブロックの後に実行するため、**IPが既に一致していても初回はゲートウェイが設定される**（要件④を満たす）。
+  - changed は「IP変更 または gateway変更のいずれかで true」を返却JSONに反映（changed_when は従来どおり `"changed":true` 判定）。
+- null/空 gateway の扱い（prefix=0事件の教訓）:
+  - gateway は**文字列として扱い [int] 変換をしない**。ConvertFrom-Json 後に `[string]::IsNullOrWhiteSpace($gw)` で判定し、
+    未定義/null/空文字なら「設定しない」に倒す（エラーにしない＝要件⑤）。ok_gw は「目標なし＝gwAfter が空」で true とする。
+- mgmt/bk の空白保証（0.0.0.0/0 除去判断）:
+  - mgmt_lan/bk_lan は絶対にゲートウェイを設定しない。加えて「空白」を保証するため、当該IFに既定ルートが残っていれば除去する
+    （既存が無ければ no-op で冪等）。デフォルトゲートウェイを sv_lan に一本化する意図（7/10以前も 0.0.0.0/0 除去を実施）。
+  - ★過剰と判断する場合の代替案をコメントに明記（else ブロックを「何もしない＝既存ルートに触れない」に変更可）。PM判断に委ねる。
+    静的IP構成のため通常これらIFに既定ルートは無い想定。
+- モジュール: win_shell/assert/debug/include_tasks（既存・新規モジュールなし）。New-NetRoute/Get-NetRoute/Remove-NetRoute は
+  win_shell 内のPowerShellでありAnsibleモジュールではないため Ansible_Docs 登録不要。使用 FQCN 4件は全て登録済みを確認。
+- 検証: 全yaml `python3 yaml.safe_load_all` OK（5ファイル）。`ansible-playbook test_configure_guest_network.yml --syntax-check` OK（exit 0）。
+- 実機検証（要実施・環境起動時）: ①sv_lan にゲートウェイ設定→ipconfig で既定ゲートウェイ表示 ②mgmt/bk は既定ゲートウェイなし
+  ③再実行でゲートウェイ changed=false（冪等）④IP一致でも初回ゲートウェイが設定されること ⑤sv_lan_gateway 空/未指定で
+  ゲートウェイ未設定＝エラーにしない ⑥New-NetRoute の永続性（再起動後もゲートウェイが残るか）。
+- PMレビューで特に見てほしい点:
+  1. ゲートウェイ冪等性を「既定ルート NextHop 比較 → 不一致時のみ Remove/New-NetRoute」で IP と独立に担保した設計の妥当性。
+  2. mgmt/bk の 0.0.0.0/0 除去（空白保証）が過剰か。代替案（既存ルートに触れない）への切替要否。
+  3. New-NetRoute の永続性（ActiveStore 既定）。PersistentStore 併用 or New-NetIPAddress -DefaultGateway 方式への切替要否。
+  4. assert に ok_gw を含めた（mgmt/bk のゲートウェイ空白も検証対象にした）ことの妥当性。
+- 他ロール・他パッケージは変更していない。Obsidian設計書登録・_index更新は未実施（PM approved ゲート前）。
+- status: **review**（PMレビュー待ち）
+
+#### 2026-07-23 PM レビュー結果: **fixing（approved見送り）**
+観点: 冪等性 / 前後状態取得 / 命名規則 / 不要タスク混入 / 永続性
+対象: configure_guest_network sv_lanデフォルトゲートウェイ追加・他LAN空白。
+
+良かった点（OK）:
+- 新変数 sv_lan_gateway を segments 固定キーに追加（sv_lan専用）、mgmt/bk は空文字で「設定しない」。変数構造・defaults/group_vars/parameter-sheet 反映も規約準拠。
+- **gateway 冪等性を IP と独立に反映**（IP設定ブロックの後段で、当該IFの既定ルート NextHop を目標と比較し不一致時のみ Remove/New）。IPが既に一致していても初回はゲートウェイが設定される設計は要件どおりで良い。
+- prefix=0事件の教訓を適用: gateway は文字列扱い・[int]変換なし・IsNullOrWhiteSpace で「設定しない」に安全に倒す。ok_gw も目標なし時は「空であること」で判定。
+- mgmt/bk の空白保証（IF単位で 0.0.0.0/0 除去）は要件「その他LAN空白」に整合。ifIndexスコープで sv_lan の既定ルートは触らない。assert に ok_gw を追加し黙って不正値で成功にしない点も良い。
+
+**[MUST-1] New-NetRoute（既定 ActiveStore）で設定したデフォルトゲートウェイが再起動後に消える**
+- `New-NetRoute` の既定 PolicyStore は **ActiveStore（現ブートセッションのみ・非永続）**。一方、同タスクの IP は `New-NetIPAddress`（既定で永続）で設定される。
+  結果、**再起動後に「IPは残るがデフォルトゲートウェイだけ消える」**非対称が発生し、構築サーバが再起動後に既定ゲートウェイを失う（他サブネット到達不可）。サーバ構築として致命的。
+- これは「実機で要確認」ではなく PolicyStore 仕様から判明する既知欠陥。実機検証待ちにせず修正すること。
+- 対応案（いずれか）:
+  (A) sv_lan の既定ルート追加を **永続化する**。`New-NetRoute ... -NextHop $gw` に加え **`-PolicyStore PersistentStore`** で永続ルートも作成（即時反映用の ActiveStore と永続用の PersistentStore の両方）。除去（Remove-NetRoute）も両ストア対象にする。
+  (B) 7/10以前の実装同様、IP設定経路で **`New-NetIPAddress -DefaultGateway $gw`**（IP＋永続既定ゲートウェイを一括設定・永続）を使い、IP一致で既定ゲートウェイのみ要調整のケースは (A) と同様に永続追加で補う。
+- mgmt/bk の 0.0.0.0/0 除去も、永続ルートが残ると再起動後に空白が崩れるため、除去を PersistentStore にも及ばせるか確認すること。
+- 修正後、永続化の実機確認項目（VM再起動後も sv_lan 既定ゲートウェイが残る／mgmt・bk は空のまま）を review-log/README の検証項目に追加。
+
+**[参考・非ブロック] mgmt/bk の既定ルート除去（空白化）**
+- 過剰か否かはPMとして許容（要件が「その他LAN空白」で、ifIndexスコープのため副作用限定的）。現行維持でよい。静的IP構成では通常 no-op。
+
+判定: **fixing**。MUST-1（ゲートウェイ永続化）を修正し再レビュー依頼のこと。それ以外（冪等設計・null処理・変数/ドキュメント反映）は承認。
+
+#### 2026-07-23 PM 1stレビュー結果: **fixing（approved見送り）**
+- [MUST-1] New-NetRoute（既定 ActiveStore・非永続）で設定した既定ゲートウェイが**再起動後に消える**。IPは New-NetIPAddress で
+  永続設定されるため「再起動後にIPは残るがGWだけ消える」非対称障害になる。PolicyStore 仕様から判明する既知欠陥のため
+  実機待ちにせず修正すること（(A)推奨: ActiveStore＋PersistentStore の両ストアへ登録して永続化／mgmt・bk の除去も両ストア対象）。
+- 承認済み（変更不要）: IP独立の冪等反映・null/空の IsNullOrWhiteSpace 処理・ok_gw 検証・変数/defaults/group_vars/parameter-sheet 反映、
+  mgmt/bk の 0.0.0.0/0 除去（空白化）自体。永続対応のみ足すこと。
+
+#### 2026-07-23 exastro_engineer 修正対応（→ 再レビュー依頼 status: review）
+- **[MUST-1] 対応（永続化）**: `tasks/configure_guest_network.yml` のゲートウェイ処理を **ActiveStore＋PersistentStore の両ストア**対応に変更。
+  - 現ストア状態取得のローカル関数 `Get-DefRouteNextHop($ifx,$store)` を追加（当該IFの 0.0.0.0/0 NextHop を指定ストアから取得）。
+  - **sv_lan（目標あり）**: 冪等判定を「**ActiveStore の NextHop が目標一致 かつ PersistentStore にも同一 NextHop あり**」に変更。
+    どちらか欠けていれば、既存 0.0.0.0/0 を **両ストアから除去**（Remove-NetRoute -PolicyStore ActiveStore / PersistentStore）してから、
+    **両ストアへ追加**（New-NetRoute -PolicyStore ActiveStore＝即時反映 / PersistentStore＝再起動後も残す）。IP独立反映は維持（IP設定後に実行）。
+  - **mgmt/bk（目標なし・空白保証）**: 0.0.0.0/0 の除去対象を **ActiveStore と PersistentStore の両方**に拡張（永続ルートが残ると
+    再起動後に空白が崩れるため）。両ストアで「既定ルートなし」を保証。既存無しなら no-op で冪等。
+  - **エビデンス拡張**: 返却JSONの各LAN要素に `gw_after_persistent`（PersistentStore の NextHop）と `gw_persisted`（永続化済みか）を追加。
+    `gw_after` は ActiveStore（実効値）。**assert（ok_gw）を「ActiveStore==目標 かつ 永続化済み」/ 目標なしは「Active空 かつ Persistent空」に強化**
+    （永続化されていなければ ok_gw=false → fail で検知）。タスク4 debug は segments に上記フィールドを含む。
+  - ヘッダコメント・README に永続化（両ストア・冪等判定・除去範囲）を明記。
+- **実機検証項目に追加**: ⑦**VM再起動後も sv_lan の既定ゲートウェイが残る**／**mgmt・bk は再起動後も空のまま**であること。
+- モジュール構成変更なし（win_shell/assert/debug/include_tasks・New/Get/Remove-NetRoute は win_shell 内PowerShell）→ モジュールマニュアル対応不要。
+- 変更ファイル: `roles/configure_guest_network/tasks/configure_guest_network.yml` / `README.md`（永続化記述）。他ロール・他パッケージ未変更。Obsidian登録なし。
+- 検証: 全yaml `python3 yaml.safe_load_all` OK（5ファイル）。`ansible-playbook test_configure_guest_network.yml --syntax-check` OK（exit 0）。
+- PMレビューで特に見てほしい点:
+  1. 冪等判定を「ActiveStore一致 かつ PersistentStore一致」の2ストアANDにした設計の妥当性（片ストア欠落時に作り直す挙動）。
+  2. assert（ok_gw）に永続化（gw_persisted）を含めた強化の妥当性。
+  3. mgmt/bk の PersistentStore からの除去範囲（両ストア空白保証）が過剰でないか。
+- status: **review**（再レビュー待ち）
+
+#### 2026-07-23 PM 再レビュー結果: **approved（設計レビュー・条件付き）**
+- [MUST-1]（既定ゲートウェイの再起動後消失）: 対応(A)採用を確認。既定ルートを **ActiveStore（即時）＋PersistentStore（永続）の両ストア**で操作。
+  - 冪等判定を「ActiveStore の NextHop==目標 かつ PersistentStore の NextHop==目標」の2ストアANDに変更。どちらか欠落時のみ両ストア除去→両ストア追加。IP独立反映（IPブロック後段）も維持。
+  - mgmt/bk の空白保証も両ストア除去へ拡張。ok_gw を「Active==目標 かつ 永続化済み（Persistent==目標）」／目標なしは「Active空 かつ Persistent空」に強化 → 非永続なら ok_gw=false で assert fail。
+  - 返却JSONに gw_after_persistent / gw_persisted を追加、debug エビデンスにも反映。**MUST-1 解消OK**。
+- 独立検証: 全5yaml safe_load_all OK、`ansible-playbook test_configure_guest_network.yml --syntax-check` OK（PM再実行）。
+- 冪等性（IP独立のgateway反映・2ストアAND判定）、null/空処理、変数/defaults/group_vars/parameter-sheet/README 反映、不要タスク混入なし、いずれも良好。
+- **判定: approved（設計レビュー）**。
+- **条件（残必須・実機検証）**: ①sv_lanにgateway設定→ipconfigで既定ゲートウェイ表示 ②mgmt/bkは既定ゲートウェイなし ③再実行でgateway changed=false（2ストアとも一致でno-op）④IP一致でも初回gateway設定 ⑤sv_lan_gateway空/未指定でgateway未設定＝エラーにしない ⑥**VM再起動後も sv_lan の既定ゲートウェイが残る／mgmt・bk は再起動後も空のまま**（PersistentStore の実効性確認）。
+- **要反映（別途）**: parameter-sheet-design は sv_lan_gateway を追記済み。他の未反映分（data_disk_* / os_family 等）は別途。
+- status: **approved**（Playbook はObsidian登録対象外）。
+
+## 2026-07-23 set_vm_disk まとめ再レビュー（6/25〜7/14 の実機フィードバック蓄積・PM）
+6/25の1stレビュー(fixing)以降、C→D転換・KVP→os_family・オフラインディスクのオンライン化・RHEL /data拡張(認証方式の二転三転)等が積み上がり一度もまとめ再レビューされていなかったため、現状の tasks/set_vm_disk.yml・defaults・group_vars を通しでレビュー。
+
+判定: **fixing（approved見送り）**。MUST-1/2 を修正のこと。
+
+**[MUST-1] 変数名不一致でロールが動作しない（tasks=data_disk_* / defaults・group_vars=os_disk_*）**
+- tasks/set_vm_disk.yml は `item.data_disk_size_gb`(5箇所)・`item.data_disk_drive_letter`(3箇所) を参照。
+  一方 defaults/main.yml・group_vars/main.yml は `os_disk_size_gb`・`os_disk_drive_letter` のまま。
+- 結果、group_vars でのローカル検証・パラメータシート代入いずれでも `item.data_disk_size_gb` が **undefined** となり、
+  タスク3 hv_vhd の `size_bytes: "{{ item.data_disk_size_gb }}GB"` 等で失敗する（ロールが通らない）。
+- 7/10・7/13 の変更ログで繰り返し「未反映・要判断」とされていた項目。C固定/D拡張のオーナー意図に従い **tasks が正**。
+- 対応: defaults/main.yml・group_vars/main.yml を `data_disk_size_gb`・`data_disk_drive_letter` に更新。
+  group_vars のドライブレターも C→**D**（D拡張のため。現状 "C" は C固定方針とも矛盾）。
+  defaults 冒頭コメントの「os_disk_size_gb...新規メンバー」等の記述も data_disk_* に整合させる。
+
+**[MUST-2] タスク7の no_log が無効化され guest_admin_password が露出する**
+- タスク7（ゲスト内パーティション拡張）は win_shell 内で `ConvertTo-SecureString '{{ item.guest_admin_password }}'` を
+  埋め込むが、`no_log: true` が **コメントアウト（165行目 `# no_log: true`）**。同種のタスク6（疎通待機）は no_log:true が有効。
+- 結果、タスク7の実行時にパスワードを含むスクリプトが結果/ログに出力され得る（-v や失敗時に顕在化）。機密漏洩。
+- 可視化はタスク8 assert・タスク9 debug が register 済み結果（パスワード非含）から行うため、タスク7に no_log を付けても
+  エビデンスは失われない（configure_guest_network タスク2 と同じ設計）。
+- 対応: タスク7の `# no_log: true` を有効化する。
+
+**[SHOULD-3] タスク7の拡張未達検知が後退（after<before の縮小のみ検知。6/25 MUST-3 の退行）**
+- 現状 `$blocked = ($after -lt $before)` で「縮小」しか異常としない。6/25 MUST-3 は「拡張要求したのに末尾未割当なし等で
+  拡張できなかった（no-op成功）」の検知が目的だった。現状は VHDX を拡張したのにゲスト側 SizeMax が伸びず before==after の場合、
+  blocked=false で assert 通過＝**黙って未拡張のまま成功**になる。
+- データディスク(D)は通常末尾に連続未割当があるため回復パーティション起因の阻害は起きにくいが、退行は事実。
+- 対応（推奨）: 目標比較を戻す。例 `Resize 試行後に (after が target 近傍に達したか) / (max が target 以上か)` を確認し、
+  未達なら blocked=true か warning をエビデンスに出す。
+
+**[SHOULD-4] タスク8.5（RHEL /data拡張）が拡張不要でも常に umount する（非冪等・再実行で失敗し得る）**
+- delegate_to の bash は毎回 `umount /data` → parted → mount → xfs_growfs を実行。拡張余地が無くても umount する。
+- /data 使用中プロセスがあると umount 失敗 → set -e で失敗。**冪等な再実行が /data 使用中だと通らない**（Windows側タスク7は
+  before<max の判定で不要時は触れないのと非対称）。
+- 対応（推奨）: umount 前に「デバイス末尾に未割当があるか / lsblk で拡張余地があるか」を確認し、不要なら umount せず OK 返却。
+
+**参考（既知・別途）**: parameter-sheet-design の data_disk_* / os_family 反映は未実施（他ロールの未反映分とまとめて）。
+configure_guest_network の現状は 2026-07-23 に別途 approved 済み（gateway追加＋永続化）＝本まとめ再レビューの対象外。
+
+---
+
+## 2026-07-24 追加ロール: uac_config（ソフトウェア制御 / UAC設定）status: review
+
+### 依頼内容（オーナー）
+os_config パッケージに、詳細設計「2.2.2 ソフトウェア制御」表2.2.3 UAC設定を反映するロールを1つ追加。
+設定値部分は Exastro パラメータシートから代入すること。
+
+### 実装概要
+- **新規ロール**: `roles/uac_config/`（memory_dump と同型：before取得→設定→reboot集約→エビデンス）
+  - `defaults/main.yml`: `VAR_uac_level`(既定 notify_default) / `VAR_uac_enablelua`(既定1) / `uac_level_map`(環境固定)
+  - `group_vars/main.yml`: ローカル検証用（notify_default）
+  - `tasks/uac_config.yml`: assert(レベル妥当性) → EnableLUA → ConsentPromptBehaviorAdmin/PromptOnSecureDesktop → reboot集約 → debug
+- **レジストリ**: `HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System`
+  - 表2.2.3（設定値=既定「アプリの変更時のみ通知」）= ConsentPromptBehaviorAdmin=5 / PromptOnSecureDesktop=1 / EnableLUA=1
+- **パラメータ代入**: `VAR_uac_level` をプルダウンで代入（レジストリ値はロール側 map で解決）。単一具体値変数。
+- **site.yml**: memory_dump の直後に `uac_config` を追加。
+- **設計書**: os-config-parameter-sheet-design.md にメニュー#9・第9節（プルダウン⇔レジストリ対応表）を追記。
+- **テスト**: test_uac_config.yml 追加。
+- **モジュール**: win_regedit / win_shell とも Obsidian Ansible_Docs 登録済みを確認。YAML構文検証OK。
+
+### 設計判断・PM確認事項
+- [ ] UACレベルの代入方式：**プルダウン（レベル名）**で代入し、レジストリ値はロール側 `uac_level_map` に隠蔽。
+      raw値（ConsentPromptBehaviorAdmin等）を直接代入する案もあるが、memory_dump の VAR_dump_type と同様に
+      「意味のある選択肢」を採る方針で良いか。
+- [ ] `VAR_uac_enablelua` を代入項目として出すか、環境固定（常に1）でパラメータから外すか。現状は代入可（既定1）。
+- [ ] reboot集約は EnableLUA 変更時のみ（通知レベル変更は再起動不要）。この粒度で良いか。
+
+### PMレビュー（2026-07-24 1stレビュー / uac_config）→ fixing
+
+**総評**: 既存 memory_dump と同型で冪等性・前後状態取得(before)・命名規則ともに規約準拠。不要タスク混入なし。
+site.yml 追加位置・assert によるレベル妥当性チェックも妥当。以下1点(SHOULD)を修正のうえ再レビュー。
+
+**[SHOULD-1] `VAR_uac_enablelua` はパラメータシート代入項目から外し、環境固定にする**
+- 詳細設計 表2.2.3 の設定対象は「コンピュータに対する変更の通知を受け取るタイミング」の**1項目のみ**。
+  UAC全体の有効/無効（EnableLUA）は設定値表に存在しない。
+- これをパラメータシートの代入項目として露出すると、運用者が誤って `0`（＝UAC無効化）に倒せてしまう。
+  セキュリティ後退かつ EnableLUA 変更は再起動を伴うため、事故時の影響が大きい。
+- 対応:
+  1. os-config-parameter-sheet-design.md 第9節の「UAC有効化」行と、メニュー一覧#9の `VAR_uac_enablelua` を
+     **代入項目から削除**（＝環境固定の注記に変更）。
+  2. ロール実装（`EnableLUA=1` 書き込み・reboot集約）は**そのまま維持**でよい。defaults の `VAR_uac_enablelua: 1`
+     は環境固定値として残す（パラメータシートからは代入しない）。
+
+**設計判断への回答（exastro_engineer からの3確認事項）**
+- Q1 UACレベルをプルダウン代入（レジストリ値はロール側 map に隠蔽）: **承認**。memory_dump の VAR_dump_type と
+  一貫し、運用者に意味のある選択肢を提示できる。raw値直接代入は不採用。
+- Q2 `VAR_uac_enablelua` の扱い: **上記 SHOULD-1 のとおり環境固定にする**（代入項目から外す）。
+- Q3 reboot集約は EnableLUA 変更時のみ（通知レベル変更は再起動不要）: **承認**。粒度は妥当。
+
+**[NICE-2 / 任意]** 通知レベル変更は再起動なしで即反映されるため、設定後に after 取得（レジストリ読み直し）を
+入れるとエビデンスが確実になる。memory_dump 踏襲で未実装でも可（consistent）。今回は必須としない。
+
+### exastro_engineer 修正対応（2026-07-24 / uac_config SHOULD-1）→ 再レビュー依頼
+- SHOULD-1: `VAR_uac_enablelua` をパラメータシート代入項目から削除し環境固定に変更。
+  - os-config-parameter-sheet-design.md: メニュー#9の変数を `VAR_uac_level` のみに / 第9節に「EnableLUAは環境固定」注記を追加。
+  - roles/uac_config/defaults/main.yml: `VAR_uac_enablelua: 1` を環境固定値である旨コメント更新（実装は維持）。
+- NICE-2(after取得): 今回は見送り（memory_dump踏襲でconsistent）。
+- Q1/Q3: PM承認済みのため変更なし。
+
+### PMレビュー（2026-07-24 再レビュー / uac_config）→ approved
+- SHOULD-1 の対応を確認。EnableLUA が代入項目から外れ、環境固定（常に1）で運用者の誤無効化を防止。
+  設計書・ロール defaults の整合も確認。
+- 冪等性・before取得・命名規則・不要タスクなし・site.yml 追加位置、いずれも問題なし。
+- **approved（設計）**。実機での冪等性2回実行・エビデンス確認は os_config 既存の残条件（実機検証）に合流。
+- 本増分は Playbook＋パラメータシート設計（ドラフト）であり、基本/詳細設計書のObsidian登録ゲート対象外。

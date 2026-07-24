@@ -5,6 +5,7 @@
 # 本ロールは vNIC の作成・スイッチ接続は行わず、以下を行う:
 #   1) 各LANの switch_map に定義した接続先スイッチの既存vNICをホスト側で特定し MAC を取得
 #   2) ゲスト内で各NIC（MACで特定）に各LANのIPを設定
+#   3) サーバLAN（sv_lan）のみ、代入値 sv_lan_gateway でデフォルトゲートウェイを設定（他LANは空白＝設定しない）
 # 接続はすべて PowerShell Direct（Invoke-Command -VMName）。
 #
 # 参照する VAR_vm メンバー:
@@ -15,10 +16,12 @@
 #     segments:                               Exastro代入値（配列。先頭要素[0]を使用・固定キー）
 #       - sv_lan_ip:   "192.168.20.2"    サーバLAN IP
 #         sv_lan_prefix: 24               サーバLAN プレフィックス長
+#         sv_lan_gateway: "192.168.20.1"  サーバLAN デフォルトゲートウェイ（sv_lan専用）
+#                                         ※ 空/未指定なら設定しない（文字列扱い・[int]変換しない）
 #         mgmt_lan_ip:   "192.168.10.2"   管理LAN IP
-#         mgmt_lan_prefix: 24             管理LAN プレフィックス長
+#         mgmt_lan_prefix: 24             管理LAN プレフィックス長（管理LANはゲートウェイを設定しない＝空白）
 #         bk_lan_ip:     "192.168.30.2"   バックアップLAN IP
-#         bk_lan_prefix: 24               バックアップLAN プレフィックス長
+#         bk_lan_prefix: 24               バックアップLAN プレフィックス長（バックアップLANはゲートウェイを設定しない＝空白）
 VAR_vm: []
 
 # LAN種別 → 接続先の仮想スイッチ名（環境固定・代入値ではない）

@@ -1,0 +1,9 @@
+---
+# uac_config 検証用 playbook（EnableLUA を変えなければ再起動不要）
+- name: 検証 - uac_config
+  hosts: targets
+  gather_facts: false
+  vars_files:
+    - roles/uac_config/group_vars/main.yml
+  roles:
+    - uac_config

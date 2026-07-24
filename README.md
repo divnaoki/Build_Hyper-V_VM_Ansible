@@ -45,7 +45,7 @@ hyperv-vm-build/
 | **set_vm_memory** | メモリを設定する。`memory_dynamic` により動的メモリ（startup/min/max）／静的メモリ（startupのみ）を切替。 | `microsoft.hyperv.hv_memory` |
 | **set_vm_disk** | OSディスクを拡張する。ホスト側で `hv_vhd` によりVHDXを拡張し、ゲスト内で PowerShell Direct によりOSパーティションを最大まで拡張する（Windowsのみ）。 | `microsoft.hyperv.hv_vhd` / `ansible.windows.win_shell` |
 | **start_vm** | VMを起動し、`Running` になるまで待機する。 | `microsoft.hyperv.hv_vm_state` |
-| **configure_guest_network** | ゲストOSに**固定3LAN**（サーバ/管理/バックアップ）のIPアドレスを設定する。LAN=仮想スイッチ1:1（**VLAN不使用**）で、各LANの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。LAN種別→スイッチ名は defaults の `switch_map` で解決し、その接続先スイッチの既存vNICをMACで特定して、ゲスト内でそのNICに各LANのIP（`segments[0].{sv,mgmt,bk}_lan_ip/prefix`）を設定する。接続は PowerShell Direct。 | `ansible.windows.win_shell`（PowerShell Direct） |
+| **configure_guest_network** | ゲストOSに**固定3LAN**（サーバ/管理/バックアップ）のIPアドレスを設定する。LAN=仮想スイッチ1:1（**VLAN不使用**）で、各LANの仮想NICは**テンプレートで追加・スイッチ接続済み**前提。LAN種別→スイッチ名は defaults の `switch_map` で解決し、その接続先スイッチの既存vNICをMACで特定して、ゲスト内でそのNICに各LANのIP（`segments[0].{sv,mgmt,bk}_lan_ip/prefix`）を設定する。**サーバLAN（sv_lan）のみ** `segments[0].sv_lan_gateway` でデフォルトゲートウェイを設定（他LANは空白）。接続は PowerShell Direct。 | `ansible.windows.win_shell`（PowerShell Direct） |
 | **create_admin_user** | ゲスト内に**ローカル管理者ユーザー**（`admin_user_name`）を作成し、**Administrators グループ**（既定SID `S-1-5-32-544` で解決）へ所属させる。`Get-LocalUser`/`Get-LocalGroupMember` で存在・所属を確認し、無い場合のみ `New-LocalUser`/`Add-LocalGroupMember` を実行（冪等）。接続は PowerShell Direct（`item.os_family == 'WindowsServer'` のみ）。 | `ansible.windows.win_shell`（PowerShell Direct） |
 
 > 実行順序（Conductor相当）: `import_template_vm` → `set_vm_cpu` → `set_vm_memory` →
@@ -136,7 +136,8 @@ VAR_vm:
 # set_vm_disk: name / os_type / os_disk_size_gb / os_disk_drive_letter / guest_admin_user / guest_admin_password
 # start_vm: name
 # configure_guest_network: name / os_type / guest_admin_user / guest_admin_password /
-#   segments: [ { sv_lan_ip, sv_lan_prefix, mgmt_lan_ip, mgmt_lan_prefix, bk_lan_ip, bk_lan_prefix } ]  ← 固定3LAN（配列先頭[0]・固定キー）
+#   segments: [ { sv_lan_ip, sv_lan_prefix, sv_lan_gateway, mgmt_lan_ip, mgmt_lan_prefix, bk_lan_ip, bk_lan_prefix } ]  ← 固定3LAN（配列先頭[0]・固定キー）
+#     ※ sv_lan_gateway はサーバLAN専用のデフォルトゲートウェイ（空/未指定なら設定しない）。mgmt_lan/bk_lan はゲートウェイ無し（空白）
 #   ※ LAN種別→スイッチ名は defaults の switch_map（sv_lan/mgmt_lan/bk_lan）で解決（環境固定・代入値ではない）
 # create_admin_user: name / os_family / admin_user_name / admin_user_password / guest_admin_user / guest_admin_password
 ```
@@ -234,7 +235,7 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - **前提**: LANと仮想スイッチは**1:1**（**VLANは使用しない**）。各LANの仮想NICは
   **テンプレート作成時に追加・スイッチ接続済み**であること。本ロールは vNICの作成・スイッチ接続は
   **行わない**（既存vNICにIPを設定するのみ）。
-- **IPは Exastro 代入値**（`segments[0]` の固定キー：`sv_lan_ip`/`sv_lan_prefix`/`mgmt_lan_ip`/
+- **IPは Exastro 代入値**（`segments[0]` の固定キー：`sv_lan_ip`/`sv_lan_prefix`/`sv_lan_gateway`/`mgmt_lan_ip`/
   `mgmt_lan_prefix`/`bk_lan_ip`/`bk_lan_prefix`）で定義する。可変長配列ではなく固定3LANの単一要素。
 - **LAN種別→接続先スイッチ名は defaults の `switch_map`**（`sv_lan`/`mgmt_lan`/`bk_lan`）で解決する
   （環境固定・代入値ではない）。そのスイッチに接続された既存vNIC（`Get-VMNetworkAdapter` の `SwitchName`）
@@ -242,7 +243,20 @@ C:\Windows\System32\Sysprep\sysprep.exe /generalize /oobe /shutdown /mode:vm
 - **NICの識別はMACで行う**（接続先スイッチはゲストOSから見えないため。ホスト側でswitch_map→vNIC→MACを解決してゲストに渡す）。
 - **1スイッチ1vNIC前提**。同一スイッチに複数vNICが接続されている場合は構成不正として fail する
   （黙って誤ったNICに設定しない）。
-- **デフォルトゲートウェイ・DNS・ホスト名は設定しない**（IP/プレフィックスのみ）。
+- **デフォルトゲートウェイはサーバLAN（sv_lan）のみ設定する**（2026-07-23・オーナー指示）。
+  代入値 `segments[0].sv_lan_gateway` を目標ゲートウェイとし、**管理LAN（mgmt_lan）/ バックアップLAN（bk_lan）は空白**
+  （ゲートウェイを設定しない）。デフォルトゲートウェイは sv_lan に一本化する。
+  - `sv_lan_gateway` は**文字列として扱い**（[int]変換はしない。prefix=0事件と同種の「$null→0 で静かに不正値」を回避）、
+    **空/未指定なら「設定しない」に倒す**（エラーにしない）。
+  - **冪等性は IP変更とは独立**に担保する。当該IFの既定ルート（`Get-NetRoute 0.0.0.0/0`）の NextHop が目標と一致していれば
+    何もしない（changed=false）。不一致/未設定なら既存 0.0.0.0/0 を除去して目標ゲートウェイで再追加する
+    （IPが既に一致していても初回はゲートウェイが設定される）。
+  - mgmt_lan/bk_lan は「空白」を保証するため、当該IFに既定ルートが残っていれば除去する（無ければ no-op で冪等）。
+  - **永続化**: 既定ルートは `ActiveStore`（即時反映）と `PersistentStore`（再起動後も残す）の**両ストア**に登録する。
+    New-NetRoute の既定は ActiveStore のみ（非永続）で、IPは永続なため「再起動後にIPは残るが既定ゲートウェイだけ消える」
+    非対称障害を避けるため。mgmt/bk の空白化も両ストアから 0.0.0.0/0 を除去して再起動後も空白を保証する。
+    冪等判定は「ActiveStore の NextHop が目標一致 かつ PersistentStore にも同一ルートあり」で no-op。
+  - ※ **DNS・ホスト名は設定しない**。
 - ホストから各VMへ各LANで疎通確認するには、ホスト側にも各スイッチの管理OS vNICが必要
   （Internalスイッチなら既定で作成される。Privateスイッチはホストから疎通不可）。VM内・VM同士の通信だけなら不要。
 - ゲスト内設定のみのため `start_vm` の後（VM稼働中）に実行する。
